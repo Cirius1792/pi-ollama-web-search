@@ -1,15 +1,30 @@
 {
-  "name": "pi-ollama-web-search",
+  "name": "@cltec/pi-ollama-web-search",
   "version": "0.1.0",
   "description": "A pi extension package that exposes Ollama Web Search as a custom tool.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cirius1792/pi-ollama-web-search"
+  },
+  "bugs": {
+    "url": "https://github.com/Cirius1792/pi-ollama-web-search/issues"
+  },
+  "homepage": "https://github.com/Cirius1792/pi-ollama-web-search#readme",
   "keywords": [
     "pi-package",
     "pi-extension",
     "ollama",
     "web-search"
   ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",

@@ -1,4 +1,4 @@
-# pi-ollama-web-search
+# @cltec/pi-ollama-web-search
 
 A reusable [pi](https://pi.dev) package that exposes [Ollama Web Search](https://docs.ollama.com/capabilities/web-search) as a custom pi tool.
 
@@ -14,7 +14,13 @@ Version 1 intentionally does not include web fetch, query caching, custom secret
 
 ## Install
 
-Install directly from GitHub:
+Install from npm:
+
+```bash
+pi install npm:@cltec/pi-ollama-web-search
+```
+
+Or install directly from GitHub:
 
 ```bash
 pi install git:github.com/Cirius1792/pi-ollama-web-search
@@ -111,6 +117,8 @@ Run checks:
 npm run typecheck
 npm test
 ```
+
+Release instructions are in [`docs/release.md`](docs/release.md).
 
 The test suite uses unit tests and a local mock HTTP server. CI does not call the live Ollama API.
 
