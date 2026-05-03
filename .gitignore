@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.vitest/
+.worktrees/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
