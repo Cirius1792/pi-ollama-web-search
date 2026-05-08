@@ -84,11 +84,11 @@ Write this exact file:
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.72.1",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
     "@types/node": "^22.0.0",
     "typebox": "^1.1.24",
     "typescript": "^5.9.0",
@@ -1208,7 +1208,7 @@ Expected: FAIL because `src/index.ts` does not exist.
 Create `src/index.ts`:
 
 ```ts
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
 import { formatSearchError, runOllamaWebSearch } from "./search.js";
