@@ -4,40 +4,43 @@
 
 `@cltec/pi-ollama-web-search` currently protects pi context by truncating long formatted output from `ollama_web_search` and `ollama_web_fetch`.
 
-That protects the model context window, but it creates an important gap: when truncation happens, the agent does not have a first-class, documented, tool-driven way to recover the full content later in the same session. The current implementation returns the full normalized payload in `details`, but that is not a reliable recovery contract for the model.
+That behavior is useful, but it leaves a gap: when output is truncated, the agent needs a first-class, documented, tool-driven way to recover the full content later. The current implementation returns the normalized payload in `details`, but that is not a reliable recovery contract for the model.
 
-This design adds an explicit, session-local full-content retrieval flow so truncated search and fetch results remain recoverable without re-calling Ollama.
+This design adds an explicit retrieval flow that keeps normal search/fetch output context-safe while still allowing the agent to recover the full underlying content when needed.
 
 ## Goals
 
-- Preserve the existing context-protection behavior for primary search and fetch tool outputs.
-- Make full content retrieval explicit and reliable when output is truncated.
-- Guarantee recovery within the current session without re-fetching from Ollama.
-- Use session-local, in-memory storage only.
-- Keep the API surface small and model-friendly.
-- Support both web search and web fetch results.
-- Allow agents to page through large stored content safely.
-- Allow search retrieval to target a specific result by index.
+- Preserve context-safe default output for `ollama_web_search` and `ollama_web_fetch`.
+- Make full content retrieval explicit, reliable, and model-friendly.
+- Allow the agent to recover full content inline or export it to a file.
+- Return enough metadata for the model to make good retrieval decisions.
+- Keep the API surface small.
+- Support both search and fetch results.
+- Support replay on cache miss so refs remain useful beyond a single in-memory cache lifetime.
 
 ## Non-goals
 
-- Do not persist stored content across sessions or process restarts.
-- Do not write stored payloads to disk.
-- Do not add caching of Ollama API responses beyond the current session-memory store.
-- Do not add automatic multi-step orchestration that chains retrieval calls on the model's behalf.
-- Do not remove truncation from the primary search or fetch tool outputs.
-- Do not add a manual deletion tool in v1.
+- Do not remove truncation from the primary search/fetch tools.
+- Do not add cross-session durable snapshot storage.
+- Do not store full large payload snapshots in session `details`.
+- Do not add automatic orchestration that decides retrieval steps on the model's behalf.
+- Do not add a separate delete tool in v1.
 
-## Summary of the design
+## Summary
 
-When `ollama_web_search` or `ollama_web_fetch` produces output that exceeds the context-safety cap, the extension will:
+The extension will expose a stable retrieval handle for every successful search and fetch result.
 
-1. Store the full normalized result in a session-local in-memory store.
-2. Return the usual truncated text for model context safety.
-3. Add explicit recovery information to both the visible text and structured `details`.
-4. Expose a new tool, `ollama_web_read_full`, that reads the stored content by opaque reference in bounded slices.
+Flow:
 
-This keeps the default behavior safe while making large results recoverable in a documented way.
+1. `ollama_web_search` and `ollama_web_fetch` continue to return context-safe visible output.
+2. Each successful call also returns a `fullContentRef` in structured `details`.
+3. The full normalized payload is cached in memory behind that ref.
+4. The new `ollama_web_read_full` tool uses the ref to retrieve one selected field at a time, either:
+   - inline, for direct model consumption, or
+   - as a file export, for large or programmatic workflows.
+5. If the ref is missing from memory, the tool transparently replays the original upstream request and rebuilds the cache under the same ref.
+
+This makes refs stable handles for recovering previously seen content without requiring the original primary tool output to carry the whole payload.
 
 ## Public interface
 
@@ -49,13 +52,13 @@ Keep the current input shape:
 
 - Input: `{ query: string }`
 - Behavior: calls `POST https://ollama.com/api/web_search`
-- Output: formatted search results with title, URL, and content snippets
+- Output: visible search results with title, URL, and content
 
-New behavior when the formatted output is truncated:
+New behavior:
 
-- store the full normalized search result in the session store
-- return truncation metadata in `details`
-- append a visible recovery instruction naming `ollama_web_read_full`
+- always return a `fullContentRef` in `details`
+- always return retrieval metadata in `details`
+- mention the ref in visible output only when truncation happens
 
 #### `ollama_web_fetch`
 
@@ -63,50 +66,306 @@ Keep the current input shape:
 
 - Input: `{ url: string }`
 - Behavior: calls `POST https://ollama.com/api/web_fetch`
-- Output: formatted fetched page title, content, and links
+- Output: visible fetched page title, content, and links
 
-New behavior when the formatted output is truncated:
+New behavior:
 
-- store the full normalized fetch result in the session store
-- return truncation metadata in `details`
-- append a visible recovery instruction naming `ollama_web_read_full`
+- always return a `fullContentRef` in `details`
+- always return retrieval metadata in `details`
+- mention the ref in visible output only when truncation happens
 
 ### New tool: `ollama_web_read_full`
 
-Add one new production tool for in-session retrieval of stored content.
+Add one new production tool for recovering previously seen content by ref.
 
 Input:
 
 - `ref: string`
+- `mode?: "inline" | "file"`
+- `section?: string`
 - `offset?: number`
 - `maxChars?: number`
 - `resultIndex?: number`
+- `path?: string`
+- `overwrite?: boolean`
 
-Behavior:
+Defaults:
 
-- loads the stored entry identified by `ref`
-- for fetch refs, reads the fetched page content
-- for search refs without `resultIndex`, reads the full stored search payload as formatted text
-- for search refs with `resultIndex`, reads only the selected result's content
-- returns only the requested bounded slice
+- `mode` defaults to `"inline"`
+- `section` defaults to `"content"`
+- `offset` defaults to `0`
+- omitting `maxChars` means "return the whole selected section" in inline mode
 
-Output:
+High-level behavior:
 
-- a text slice suitable for model consumption
-- structured metadata including:
-  - `ref`
-  - `offset`
-  - `returnedChars`
-  - `totalChars`
-  - `hasMore`
-  - `nextOffset?`
-  - `resultIndex?`
+- the tool is strictly ref-based
+- it retrieves exactly one field/section at a time
+- for search refs, `resultIndex` is required and is 1-based
+- for fetch refs, `resultIndex` is invalid
+- invalid ref/section/parameter combinations fail clearly rather than being ignored
 
-## Truncation contract
+## Retrieval model
 
-### Visible text
+### Modes
 
-When truncation occurs, the tool output should do more than say that truncation happened. It should explicitly tell the model how to recover the remainder.
+#### Inline mode
+
+Inline mode returns raw selected text directly to the model.
+
+Rules:
+
+- returns only the selected text, with no wrapper label
+- supports `offset` and `maxChars`
+- if `maxChars` is omitted, returns the whole selected section
+- uses raw field content rather than formatted search/fetch output as the offset basis
+
+#### File mode
+
+File mode writes the full selected section to disk and returns metadata only.
+
+Rules:
+
+- writes the full selected section only
+- ignores `offset` and `maxChars`
+- never echoes the exported content inline
+- returns path/metadata only
+
+### Selectable sections
+
+#### Fetch refs
+
+Supported sections:
+
+- `title`
+- `content`
+- `links`
+
+Section representation:
+
+- `title` → raw title text
+- `content` → raw normalized page content
+- `links` → newline-delimited URLs with no numbering
+
+#### Search refs
+
+Supported sections:
+
+- `title`
+- `url`
+- `content`
+
+Rules:
+
+- `resultIndex` is required
+- `resultIndex` is 1-based and matches the numbering shown in visible search output
+- retrieval is limited to one field of one result at a time
+
+## Ref semantics
+
+### Ref creation
+
+- every successful search/fetch invocation gets a new unique ref
+- refs are not deduplicated by identical inputs
+- refs remain stable across replay-based cache rebuilds
+
+### What a ref means
+
+A ref means: recover this previously seen logical target.
+
+Operationally:
+
+- if the normalized payload is still cached in memory, serve from cache
+- if the payload is missing, replay the original upstream request using stored replay inputs
+- rebuild the cache under the same ref
+- then serve the requested section
+
+This is a best-effort reproducible handle, not an immutable snapshot guarantee. Replayed content may differ from the originally observed content.
+
+## Replay and cache behavior
+
+### In-memory cache
+
+Store the normalized structured payload in memory behind each ref.
+
+Stored payload shape:
+
+- fetch refs store normalized `{ title, content, links }`
+- search refs store normalized `{ results: [...] }`
+- derived retrieval metadata may also be cached for convenience
+
+Do not store only pre-rendered text, and do not use the raw Ollama response as the primary retrieval representation.
+
+### Eviction
+
+Use a size-based LRU-style cache policy.
+
+Rules:
+
+- the primary budget is total stored size, not entry count alone
+- least-recently-used entries are evicted first
+- a single oversized current entry is still kept even if it exceeds the normal target by itself
+
+### Replay inputs stored in details
+
+Store compact replay metadata in `details`, not the full payload snapshot.
+
+For fetch refs, store at least:
+
+- `kind: "fetch"`
+- `ref`
+- original `url`
+
+For search refs, store at least:
+
+- `kind: "search"`
+- `ref`
+- original `query`
+- original `maxResults`
+- original displayed result URL list in order
+
+This keeps `details` compact while allowing replay and safer search remapping.
+
+### Replay behavior
+
+Replay is allowed in both `inline` and `file` modes.
+
+Rules:
+
+- replay uses the same normalization pipeline as the original request path
+- refs remain stable after replay rebuilds cache
+- visible output stays transparent; replay is not announced in normal visible text
+- `details` may record `servedFrom: "cache" | "replay"`
+
+### Replay failures
+
+If the cache is missing and replay fails, return an explicit combined error explaining both facts.
+
+Example style:
+
+- `Stored content for ref ws_f_abc123 was not available in session cache, and replaying the original fetch request failed: ...`
+
+Do not collapse replay failures into a generic "ref not found" message.
+
+## Search replay remapping
+
+Search refs need extra care because replayed search result order may change.
+
+Rules:
+
+- store the original displayed result URL list in order
+- on cache-miss replay, remap the requested `resultIndex` by original URL identity rather than blindly trusting the new numeric order
+- if duplicate URLs exist, match by duplicate occurrence order
+- if the original URL is no longer present, fail clearly rather than silently using the new result at the same numeric position
+
+This keeps `resultIndex` tied to the originally shown result as much as possible.
+
+## Formatting and truncation
+
+### Fetch formatting
+
+Keep fetch formatting content-first.
+
+Rules:
+
+- preserve title and links whenever reasonably possible
+- truncate `content` first
+- only truncate title/links when they alone cannot fit under the cap
+
+This allows exact fetch section visibility metadata.
+
+### Search formatting
+
+Search formatting should become result-aware and content-first.
+
+Rules:
+
+- render results in order
+- preserve each visible result's title and URL whenever possible
+- truncate primarily inside result content
+- when truncation happens inside result N, spend remaining budget on that result's content and then stop
+- omit later results entirely rather than partially rendering their metadata
+- visible truncated output should keep normal numbering for shown results and use one omission note for later results
+
+Recommended omission note style:
+
+```text
+Additional search results were omitted from visible output. Use ollama_web_read_full with this ref and a resultIndex to retrieve them.
+```
+
+## Retrieval metadata in details
+
+Return retrieval metadata in nested shapes that mirror retrieval inputs.
+
+### Top-level
+
+Search/fetch tool results should include at least:
+
+- `fullContentRef`
+- `truncated`
+- replay metadata needed for future cache miss recovery
+- nested target metadata
+
+### Fetch metadata
+
+Recommended structure:
+
+- `targets.title`
+- `targets.content`
+- `targets.links`
+
+Each target can include:
+
+- `totalChars`
+- `visibleChars`
+- `remainingChars`
+- `recommendedRetrievalMode`
+
+Because fetch truncation is field-aware, exact `visibleChars` is available.
+
+### Search metadata
+
+Recommended structure:
+
+- `results[1].title`
+- `results[1].url`
+- `results[1].content`
+- etc. for all results, including omitted ones
+
+Each target can include:
+
+- `totalChars`
+- `visibleChars`
+- `remainingChars`
+- `recommendedRetrievalMode`
+
+Truncated search details should include retrieval metadata for all original results, including omitted ones with `visibleChars: 0` where appropriate.
+
+### Retrieval recommendations
+
+Return `recommendedRetrievalMode` per retrievable target, not as one top-level value.
+
+Policy:
+
+- deterministic
+- size-based
+- derived from the selected target's `remainingChars`
+
+Recommended v1 rule:
+
+- `inline` when `remainingChars <= 12_000`
+- `file` when `remainingChars > 12_000`
+
+## Visible output rules
+
+### Non-truncated results
+
+- visible output stays clean
+- do not show the ref in visible text
+- still return ref and retrieval metadata in `details`
+
+### Truncated results
+
+When truncation happens, visible output should explicitly mention recovery.
 
 Recommended notice style:
 
@@ -114,314 +373,210 @@ Recommended notice style:
 [Output truncated to 50000 characters to protect pi context. Full content is available via ollama_web_read_full with ref ws_f_abc123.]
 ```
 
-This notice should appear in normal visible tool content so the model can see the recovery path without depending on hidden internals.
+For search, if later results are omitted, also include the omission note described above.
 
-### Structured metadata
+## File mode behavior
 
-When truncation occurs, `details` should include metadata such as:
+### Path handling
 
-- `truncated: true`
-- `fullContentRef: string`
-- `fullContentKind: "search" | "fetch"`
-- `totalChars: number`
-- `availableSegments?: number`
+`path` handling should mirror built-in file tools.
 
-When truncation does not occur, include:
+Rules:
 
-- `truncated: false`
+- accept relative or absolute paths
+- resolve relative paths from `ctx.cwd`
+- tolerate a leading `@`
+- canonicalize resolved paths before queueing/writing
+- allow writing anywhere built-in file tools can write, not just inside the workspace
 
-The full normalized payload should no longer be treated as the primary recovery mechanism. The explicit ref-based contract is the recovery mechanism.
+### Parent directories
 
-## Retrieval semantics
+- create missing parent directories automatically
 
-### Paging model
+### Overwrite behavior
 
-Use `offset + maxChars` paging rather than precomputed chunk ids.
+- refuse to overwrite existing files by default
+- allow overwrite only when `overwrite: true` is explicitly provided
 
-Why:
+### File mutation queue
 
-- simpler tool contract
-- easier for the model to continue reading from `nextOffset`
-- works naturally for both fetch and search
-- avoids extra chunk-index bookkeeping in v1
+Use pi's file mutation queue for all file-mode writes, including auto-created temp files, so the implementation stays consistent and safe.
 
-### Search-specific retrieval
+### Auto-created temp files
 
-For search refs, support `resultIndex`.
+If `path` is omitted:
 
-Behavior:
+- create a temporary file automatically
+- place it outside the repo, under an extension-specific directory in the system temp area
+- auto-delete it on `session_shutdown`
 
-- if `resultIndex` is omitted, the retrieval tool reads the entire stored search payload as formatted text
-- if `resultIndex` is provided, the retrieval tool reads only that specific result
+Tool guidance should explicitly say that auto-created files are temporary and will be lost at the end of the session.
 
-This avoids wasting context when the agent only needs one search result's full content.
+### Explicit paths
 
-### Context safety of retrieval
+If `path` is provided:
 
-`ollama_web_read_full` must also remain context-safe.
+- treat it as a deliberate export
+- do not auto-delete it
+- tool guidance should remind the agent to delete explicit export files if they are no longer needed, to avoid polluting the workspace
 
-That means:
+## Tool guidance
 
-- `maxChars` is bounded server-side
-- returned content may itself be partial
-- the tool always reports whether more content remains
+### `ollama_web_search` and `ollama_web_fetch`
 
-The retrieval tool is therefore not a bypass around context safety. It is a controlled paging interface.
+Keep existing guidance and add enough metadata so the model can tell how much content is missing when truncation occurs.
 
-## Storage model
+### `ollama_web_read_full`
 
-### Session-local store
+Its description and prompt guidance should explicitly teach the model:
 
-Add an internal in-memory store owned by the extension runtime.
+- use `ollama_web_read_full` only with refs from previous search/fetch results
+- use `mode: "inline"` when the agent wants full selected text in model context
+- use `mode: "file"` when the content is large or should be inspected/programmatically processed with file tools
+- if the cached ref is missing from memory, `ollama_web_read_full` may transparently replay the original request
+- if no `path` is provided in file mode, the file is temporary and will be lost at session end
+- if an explicit `path` is used and the file is no longer needed, delete it rather than polluting the workspace
 
-Each entry should include:
+## Dev tooling
 
-- `ref: string`
-- `kind: "search" | "fetch"`
-- full normalized payload
-- `createdAt: number`
-- `lastAccessedAt: number`
-- aggregate size metadata
+Add a dev-only debug command behind `PI_OLLAMA_SEARCH_DEV`:
 
-Recommended metadata:
+- `/ollama-read-full`
 
-- `totalChars`
-- for search entries, per-result char counts
+This should exercise the same retrieval logic as the production tool for local/manual testing.
 
-### Ref generation
+## Validation and errors
 
-Use opaque random ids that do not reveal URLs or queries.
+Reject invalid combinations with clear errors.
 
 Examples:
 
-- `ws_f_<random>` for fetch
-- `ws_s_<random>` for search
-
-The exact random format is an implementation detail, but refs must be unique within the process lifetime and easy to distinguish by kind during debugging.
-
-### Lifetime
-
-Entries live only for the current session / extension runtime.
-
-Entries are lost when:
-
-- pi exits
-- the extension reloads
-- the process restarts
-
-This is acceptable because the requirement is guaranteed in-session recoverability, not cross-session persistence.
-
-### Eviction policy
-
-Use a simple bounded in-memory policy.
-
-Recommended v1 behavior:
-
-- cap the number of stored entries, e.g. 20 to 50
-- evict least-recently-accessed entries when the cap is exceeded
-
-This prevents unbounded memory growth while keeping the implementation straightforward.
+- `resultIndex is required for search refs.`
+- `resultIndex is only valid for search refs.`
+- `Section "links" is not valid for search refs.`
+- `Section "url" is not valid for fetch refs.`
+- `Offset must be 0 or greater.`
+- `Search result index 6 is out of range. Valid range is 1-5.`
 
 ## Architecture
 
-Keep the current layered search/fetch flow and add a minimal set of modules.
+Recommended module layout:
 
 ```text
 src/index.ts
-  registers search, fetch, and read-full tools
-  wires session store into handlers
+  registers search, fetch, and read-full tools and dev commands
+  wires cache/temp-file lifecycle hooks
 
 src/store.ts
-  in-memory store for truncated results
-  ref creation, lookup, access tracking, eviction
+  ref cache, size accounting, LRU eviction, replay metadata helpers
 
 src/search.ts
   existing search orchestration
-  stores full normalized result when truncation occurs
-  returns truncation metadata
+  result-aware formatting
+  retrieval metadata production
 
 src/fetch.ts
   existing fetch orchestration
-  stores full normalized result when truncation occurs
-  returns truncation metadata
+  field-aware formatting
+  retrieval metadata production
 
 src/read-full.ts
-  validates retrieval params
-  loads stored entries
-  slices content by offset/maxChars
-  supports resultIndex for search refs
+  retrieval validation
+  cache lookup
+  replay on cache miss
+  section extraction
+  inline/file execution
 
 src/format.ts
-  formats search/fetch output
-  produces recovery notices when truncation occurs
+  shared formatting helpers for visible output and truncation notices
 ```
 
-This keeps search/fetch responsibilities intact and isolates new storage and retrieval behavior in small, testable modules.
+Also add session cleanup logic:
 
-## Data flow
-
-### Truncated fetch flow
-
-```text
-ollama_web_fetch
-  → call Ollama fetch API
-  → normalize full response
-  → format output with maxOutputChars
-  → if not truncated: return normal result
-  → if truncated:
-      → store normalized payload in session store
-      → generate opaque ref
-      → append recovery notice with ref
-      → return truncated text + truncation metadata
-```
-
-### Truncated search flow
-
-```text
-ollama_web_search
-  → call Ollama search API
-  → normalize full response
-  → format output with maxOutputChars
-  → if not truncated: return normal result
-  → if truncated:
-      → store normalized payload in session store
-      → generate opaque ref
-      → append recovery notice with ref
-      → return truncated text + truncation metadata
-```
-
-### Retrieval flow
-
-```text
-ollama_web_read_full
-  → validate ref/offset/maxChars/resultIndex
-  → load stored entry from session store
-  → select fetch content or search content
-  → slice requested range
-  → return bounded text slice + paging metadata
-```
-
-## Validation and error handling
-
-`ollama_web_read_full` should return clear user-facing errors.
-
-Cases to cover:
-
-- unknown ref
-- expired or evicted ref
-- invalid `offset`
-- invalid `maxChars`
-- invalid `resultIndex`
-- `resultIndex` provided for a fetch ref, if that is rejected rather than ignored
-
-Recommended messages:
-
-- `Stored Ollama web result not found for ref ws_f_abc123. It may have expired from session memory.`
-- `Offset must be 0 or greater.`
-- `maxChars must be greater than 0.`
-- `Search result index 6 is out of range.`
-
-The search and fetch tools should continue using the current API key and network error behavior. This design only changes recovery after successful responses.
-
-## Result shaping
-
-Search and fetch orchestration functions should return richer structured results than today.
-
-Recommended shape:
-
-- `formatted: string`
-- `normalized: ...`
-- `truncated: boolean`
-- `fullContentRef?: string`
-- `totalChars: number`
-
-This allows `src/index.ts` to expose both:
-
-- context-safe visible text
-- machine-readable truncation metadata in `details`
-
-## Formatting details
-
-### Search and fetch output
-
-When not truncated, keep existing formatting behavior unchanged.
-
-When truncated:
-
-- preserve the current truncation notice style
-- extend it with a recovery instruction naming `ollama_web_read_full` and the generated ref
-
-### Retrieval output
-
-The retrieval tool should return plain readable text plus clear paging metadata.
-
-Recommended behavior:
-
-- return exactly one bounded slice per call
-- do not attempt to auto-stream subsequent slices
-- include `hasMore` and `nextOffset` when additional content remains
-
-This keeps the interaction model predictable for both the agent and tests.
+- clear in-memory ref cache on shutdown
+- delete auto-created temp files on `session_shutdown`
 
 ## Testing plan
 
-Add or update tests without requiring live Ollama API access.
-
-### New `test/store.test.ts`
-
-Cover:
-
-- storing search and fetch entries
-- retrieving by ref
-- access-time updates
-- eviction behavior
-- unknown ref handling
+Add or update tests without live Ollama API access.
 
 ### New `test/read-full.test.ts`
 
 Cover:
 
-- fetch paging by `offset` and `maxChars`
-- search paging without `resultIndex`
-- search paging with `resultIndex`
-- invalid ref
-- invalid offset
-- invalid maxChars
-- invalid result index
+- fetch inline retrieval for each supported section
+- search inline retrieval for each supported section
+- search `resultIndex` validation and 1-based indexing
+- file mode metadata-only responses
+- invalid section/ref/parameter combinations
+- overwrite behavior
+- explicit path handling and parent directory creation
+
+### New `test/store.test.ts`
+
+Cover:
+
+- unique refs per invocation
+- cache insert/lookup
+- size-based eviction
+- oversized current entry behavior
+- stable ref reuse after replay rebuild
+
+### Update `test/search.test.ts`
+
+Cover:
+
+- result-aware/content-first truncation
+- omission note for later results
+- retrieval metadata for all original results
+- search replay remapping by original URL identity
+
+### Update `test/fetch.test.ts`
+
+Cover:
+
+- content-first truncation
+- exact fetch target visibility metadata
+- retrieval metadata production
 
 ### Update `test/format.test.ts`
 
 Cover:
 
 - truncation notice includes recovery guidance
-- ref appears in the truncation notice when content is stored
-- non-truncated output remains unchanged
-
-### Update `test/search.test.ts` and `test/fetch.test.ts`
-
-Cover:
-
-- truncated results are stored
-- orchestration returns `truncated`, `fullContentRef`, and `totalChars`
-- non-truncated results do not create store entries
+- ref is shown only on truncated visible output
+- search omission note behavior
 
 ### Update `test/extension.test.ts`
 
 Cover:
 
-- `ollama_web_read_full` is registered as a production tool
-- search/fetch tools expose truncation metadata when needed
-- existing search/fetch registration behavior remains intact
+- `ollama_web_read_full` registration
+- `/ollama-read-full` dev command registration in dev mode
+- prompt guidance for inline/file mode and cleanup expectations
+- `session_shutdown` cleanup behavior where practical
+
+### Replay tests
+
+Cover:
+
+- cache miss triggers replay
+- replay uses the normalization pipeline
+- replay works in inline and file mode
+- replay failure produces combined cache-miss + replay-failure error
+- `servedFrom` details flag
+- duplicate-URL remapping rules for search replay
 
 ## Documentation updates
 
 Update `README.md` after implementation to document:
 
-- that long outputs may be truncated to protect context
-- that full content can be recovered within the session using `ollama_web_read_full`
-- that retrieval is session-local and does not survive restart
-
-If needed, update troubleshooting guidance to explain expired refs.
+- that search/fetch outputs may truncate visible content to protect context
+- that every successful search/fetch result returns a retrievable ref in structured metadata
+- that `ollama_web_read_full` supports inline retrieval and file export
+- that file mode without `path` creates a temporary file that is deleted at session end
+- that explicit export paths persist and should be cleaned up if no longer needed
+- that replay may occur on cache miss and can return changed web content
 
 ## Verification
 
@@ -432,7 +587,7 @@ npm run typecheck
 npm test
 ```
 
-If package contents or documentation are updated as part of implementation, also run:
+If package contents or docs are updated as part of implementation, also run:
 
 ```bash
 npm pack --dry-run
