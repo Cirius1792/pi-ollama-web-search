@@ -3,6 +3,8 @@ import extension from "../src/index.js";
 
 interface RegisteredTool {
   name: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
   execute: (...args: any[]) => Promise<any>;
 }
 
@@ -43,6 +45,28 @@ describe("extension", () => {
 
     expect(fake.pi.registerTool).toHaveBeenCalledTimes(2);
     expect(fake.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["ollama_web_search", "ollama_web_fetch"]));
+  });
+
+  it("adds proactive guidance for when search and fetch should be used", () => {
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+
+    expect(searchTool?.promptGuidelines).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("latest, current, or recent"),
+        expect.stringContaining("documentation or references"),
+      ]),
+    );
+
+    expect(fetchTool?.promptGuidelines).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("user provides a URL"),
+        expect.stringContaining("before quoting or summarizing"),
+      ]),
+    );
   });
 
   it("does not register the debug command by default", () => {

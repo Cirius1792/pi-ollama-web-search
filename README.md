@@ -49,6 +49,11 @@ For persistent setup, add the export to your shell profile such as `~/.profile`,
 
 Ask pi questions that benefit from web search or page fetch.
 
+The extension includes prompt guidance so pi proactively uses tools when appropriate:
+
+- `ollama_web_search` for unknown URLs, documentation/reference lookup, and requests about latest/current/recent information.
+- `ollama_web_fetch` when a URL is known (or provided by the user), and before quoting/summarizing details from a specific page.
+
 Example prompts:
 
 ```text

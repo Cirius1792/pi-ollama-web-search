@@ -2,7 +2,7 @@
 
 ## Repository overview
 
-This repository contains `@cltec/pi-ollama-web-search`, a TypeScript ESM pi extension package that registers an `ollama_web_search` tool. The tool calls Ollama's Web Search API and returns formatted search results to pi.
+This repository contains `@cltec/pi-ollama-web-search`, a TypeScript ESM pi extension package that registers `ollama_web_search` and `ollama_web_fetch` tools. The tools call Ollama's Web Search and Web Fetch APIs and return formatted results to pi.
 
 Core runtime flow:
 
@@ -33,7 +33,7 @@ The test suite uses Vitest and local/mock HTTP behavior. Do not require live Oll
 ## Environment variables
 
 - `OLLAMA_API_KEY`: required for live Ollama Web Search calls.
-- `PI_OLLAMA_SEARCH_DEV=1`: enables the development-only `/ollama-search` debug slash command.
+- `PI_OLLAMA_SEARCH_DEV=1`: enables the development-only `/ollama-search` and `/ollama-fetch` debug slash commands.
 
 Do not commit API keys, `.env` files, or other secrets.
 
@@ -58,7 +58,7 @@ Do not commit API keys, `.env` files, or other secrets.
 
 ## pi extension guidance
 
-- The package exposes one production tool: `ollama_web_search`.
+- The package exposes two production tools: `ollama_web_search` and `ollama_web_fetch`.
 - The debug command `/ollama-search` must remain gated behind `PI_OLLAMA_SEARCH_DEV`.
 - The extension should warn on `session_start` when `OLLAMA_API_KEY` is missing and UI is available.
 - Keep tool parameters schema-based with `typebox`.

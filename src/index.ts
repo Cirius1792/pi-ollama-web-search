@@ -22,6 +22,8 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     promptSnippet: "Search the web using Ollama Web Search for current or external information.",
     promptGuidelines: [
       "Use ollama_web_search to discover relevant pages or current information when URLs are not known yet.",
+      "Use ollama_web_search for documentation or references when the answer depends on external sources.",
+      "When the user asks for latest, current, or recent information, run ollama_web_search before answering.",
       "Use ollama_web_search before ollama_web_fetch when you need candidate URLs first.",
     ],
     parameters: SearchParams,
@@ -42,7 +44,9 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     promptSnippet: "Fetch a known URL using Ollama Web Fetch to retrieve fuller page content and links.",
     promptGuidelines: [
       "Use ollama_web_fetch when a specific URL is known and you need page content or links.",
+      "Use ollama_web_fetch when the user provides a URL to inspect.",
       "Use ollama_web_fetch after ollama_web_search when search snippets are insufficient.",
+      "Fetch source pages before quoting or summarizing details from a specific page.",
     ],
     parameters: FetchParams,
 
