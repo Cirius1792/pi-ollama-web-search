@@ -25,7 +25,7 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
   }
 
   const raw = await searchOllamaWeb({
-    endpoint: options.config.endpoint,
+    endpoint: options.config.searchEndpoint,
     apiKey: options.config.apiKey,
     query: trimmedQuery,
     maxResults: options.config.maxResults,
@@ -39,7 +39,7 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
   return { formatted, normalized };
 }
 
-export function formatSearchError(error: unknown): string {
+export function formatOllamaWebError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }

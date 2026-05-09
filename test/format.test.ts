@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSearchResults } from "../src/format.js";
+import { formatFetchResult, formatSearchResults } from "../src/format.js";
 
 describe("formatSearchResults", () => {
   it("formats search results as readable text", () => {
@@ -48,5 +48,68 @@ describe("formatSearchResults", () => {
 
     expect(text.length).toBeLessThanOrEqual(180);
     expect(text).toContain("[Output truncated to 180 characters");
+  });
+});
+
+describe("formatFetchResult", () => {
+  it("formats fetch result with title content and links", () => {
+    const text = formatFetchResult(
+      {
+        title: "Ollama",
+        content: "Main content",
+        links: ["https://ollama.com/", "https://ollama.com/models"],
+      },
+      { maxOutputChars: 10_000 },
+    );
+
+    expect(text).toContain("Fetched page:");
+    expect(text).toContain("Title: Ollama");
+    expect(text).toContain("Content:");
+    expect(text).toContain("Links:");
+    expect(text).toContain("[1] https://ollama.com/");
+    expect(text).toContain("[2] https://ollama.com/models");
+  });
+
+  it("formats empty links clearly", () => {
+    const text = formatFetchResult(
+      {
+        title: "Ollama",
+        content: "Main content",
+        links: [],
+      },
+      { maxOutputChars: 10_000 },
+    );
+
+    expect(text).toContain("Links:");
+    expect(text).toContain("No links found.");
+  });
+
+  it("truncates fetch output when cap is exceeded", () => {
+    const text = formatFetchResult(
+      {
+        title: "Large",
+        content: "x".repeat(500),
+        links: ["https://example.com/1", "https://example.com/2"],
+      },
+      { maxOutputChars: 180 },
+    );
+
+    expect(text.length).toBeLessThanOrEqual(180);
+    expect(text).toContain("[Output truncated to 180 characters");
+  });
+
+  it("preserves links when content is truncated", () => {
+    const text = formatFetchResult(
+      {
+        title: "Large Content Page",
+        content: "x".repeat(1000),
+        links: ["https://example.com/1", "https://example.com/2"],
+      },
+      { maxOutputChars: 500 },
+    );
+
+    expect(text).toContain("Links:");
+    expect(text).toContain("[1] https://example.com/1");
+    expect(text).toContain("[2] https://example.com/2");
   });
 });

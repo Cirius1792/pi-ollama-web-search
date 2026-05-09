@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { getMissingApiKeyMessage } from "../src/config.js";
-import { formatOllamaWebError, runOllamaWebSearch } from "../src/search.js";
+import { runOllamaWebFetch } from "../src/fetch.js";
 
-describe("runOllamaWebSearch", () => {
+describe("runOllamaWebFetch", () => {
   it("fails before network calls when API key is missing", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
 
     await expect(
-      runOllamaWebSearch("test", {
+      runOllamaWebFetch("https://ollama.com", {
         config: {
           apiKey: undefined,
           devMode: false,
@@ -27,13 +27,15 @@ describe("runOllamaWebSearch", () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
-          results: [{ title: " Ollama ", url: " https://ollama.com ", content: "Cloud models" }],
+          title: " Ollama ",
+          content: "Cloud models",
+          links: [" https://ollama.com/ "],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
 
-    const result = await runOllamaWebSearch("what is ollama?", {
+    const result = await runOllamaWebFetch(" ollama.com ", {
       config: {
         apiKey: "test-key",
         devMode: false,
@@ -46,14 +48,16 @@ describe("runOllamaWebSearch", () => {
     });
 
     expect(result.normalized).toEqual({
-      results: [{ title: "Ollama", url: "https://ollama.com", content: "Cloud models" }],
+      title: "Ollama",
+      content: "Cloud models",
+      links: ["https://ollama.com/"],
     });
-    expect(result.formatted).toContain("[1] Ollama");
+    expect(result.formatted).toContain("Fetched page:");
   });
 
-  it("trims query and rejects blank input", async () => {
+  it("trims url and rejects blank input", async () => {
     await expect(
-      runOllamaWebSearch("   ", {
+      runOllamaWebFetch("   ", {
         config: {
           apiKey: "test-key",
           devMode: false,
@@ -63,16 +67,6 @@ describe("runOllamaWebSearch", () => {
           maxOutputChars: 50_000,
         },
       }),
-    ).rejects.toThrow("Search query must not be empty.");
-  });
-});
-
-describe("formatOllamaWebError", () => {
-  it("formats ordinary errors", () => {
-    expect(formatOllamaWebError(new Error("boom"))).toBe("boom");
-  });
-
-  it("formats unknown thrown values", () => {
-    expect(formatOllamaWebError("bad value")).toBe("bad value");
+    ).rejects.toThrow("Fetch URL must not be empty.");
   });
 });

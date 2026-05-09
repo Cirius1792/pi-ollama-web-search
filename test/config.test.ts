@@ -7,6 +7,9 @@ import {
   loadConfig,
 } from "../src/config.js";
 
+const EXPECTED_SEARCH_ENDPOINT = "https://ollama.com/api/web_search";
+const EXPECTED_FETCH_ENDPOINT = "https://ollama.com/api/web_fetch";
+
 describe("isTruthyEnv", () => {
   it("treats 1 and true as enabled", () => {
     expect(isTruthyEnv("1")).toBe(true);
@@ -33,7 +36,8 @@ describe("loadConfig", () => {
 
     expect(config.apiKey).toBe("ollama-secret");
     expect(config.devMode).toBe(true);
-    expect(config.endpoint).toBe("https://ollama.com/api/web_search");
+    expect(config.searchEndpoint).toBe(EXPECTED_SEARCH_ENDPOINT);
+    expect(config.fetchEndpoint).toBe(EXPECTED_FETCH_ENDPOINT);
     expect(config.maxResults).toBe(DEFAULT_MAX_RESULTS);
     expect(config.maxOutputChars).toBe(DEFAULT_MAX_OUTPUT_CHARS);
   });
@@ -52,6 +56,8 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.apiKey).toBeUndefined();
     expect(config.devMode).toBe(false);
+    expect(config.searchEndpoint).toBe(EXPECTED_SEARCH_ENDPOINT);
+    expect(config.fetchEndpoint).toBe(EXPECTED_FETCH_ENDPOINT);
     expect(config.maxResults).toBe(5);
     expect(config.maxOutputChars).toBe(50_000);
   });

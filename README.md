@@ -1,16 +1,18 @@
 # @cltec/pi-ollama-web-search
 
-A reusable [pi](https://pi.dev) package that exposes [Ollama Web Search](https://docs.ollama.com/capabilities/web-search) as a custom pi tool.
+A reusable [pi](https://pi.dev) package that exposes Ollama web APIs as custom pi tools.
 
 ## What it provides
 
-This package registers one production tool:
+This package registers two production tools:
 
 - `ollama_web_search`
+- `ollama_web_fetch`
 
-The tool accepts a search query and returns Ollama web search results with title, URL, and content.
+Tool behavior:
 
-Version 1 intentionally does not include web fetch, query caching, custom secret storage, or search-agent orchestration.
+- `ollama_web_search` accepts a search query and returns web results with title, URL, and content snippets.
+- `ollama_web_fetch` accepts a URL and returns fetched page title, content, and discovered links.
 
 ## Install
 
@@ -45,17 +47,21 @@ For persistent setup, add the export to your shell profile such as `~/.profile`,
 
 ## Usage
 
-Ask pi a question that benefits from web search. The model can call `ollama_web_search` when it needs current or external information.
+Ask pi questions that benefit from web search or page fetch.
 
-Example prompt:
+Example prompts:
 
 ```text
-Search the web for recent Ollama Web Search API documentation and summarize what changed.
+Search for recent Ollama engine updates, then fetch the official blog post URL and summarize details.
+```
+
+```text
+Fetch https://ollama.com and list the most important links from the page.
 ```
 
 ## Dev mode
 
-A debug slash command is available only when dev mode is enabled.
+Debug slash commands are available only when dev mode is enabled.
 
 Enable it before starting pi:
 
@@ -68,9 +74,10 @@ Then run:
 
 ```text
 /ollama-search what is ollama?
+/ollama-fetch https://ollama.com
 ```
 
-The debug command is intended for local testing and troubleshooting. It is not part of the normal user workflow.
+Debug commands are intended for local testing and troubleshooting. They are not part of the normal user workflow.
 
 Changing `PI_OLLAMA_SEARCH_DEV` requires restarting pi or reloading extensions.
 
@@ -101,6 +108,7 @@ Check that your network can reach:
 
 ```text
 https://ollama.com/api/web_search
+https://ollama.com/api/web_fetch
 ```
 
 ## Development
@@ -134,4 +142,5 @@ Then run:
 
 ```text
 /ollama-search what is ollama?
+/ollama-fetch https://ollama.com
 ```

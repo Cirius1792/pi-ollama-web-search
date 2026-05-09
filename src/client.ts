@@ -1,13 +1,13 @@
-export type OllamaWebSearchErrorCode = "http_error" | "invalid_json" | "network_error";
+export type OllamaWebErrorCode = "http_error" | "invalid_json" | "network_error";
 
-export class OllamaWebSearchError extends Error {
-  readonly code: OllamaWebSearchErrorCode;
+export class OllamaWebError extends Error {
+  readonly code: OllamaWebErrorCode;
   readonly status?: number;
   readonly responseBody?: string;
 
-  constructor(message: string, options: { code: OllamaWebSearchErrorCode; status?: number; responseBody?: string; cause?: unknown }) {
+  constructor(message: string, options: { code: OllamaWebErrorCode; status?: number; responseBody?: string; cause?: unknown }) {
     super(message, { cause: options.cause });
-    this.name = "OllamaWebSearchError";
+    this.name = "OllamaWebError";
     this.code = options.code;
     this.status = options.status;
     this.responseBody = options.responseBody;
@@ -23,30 +23,46 @@ export interface SearchOllamaWebOptions {
   fetchImpl?: typeof fetch;
 }
 
+export interface FetchOllamaWebOptions {
+  endpoint: string;
+  apiKey: string;
+  url: string;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
 async function readResponseBody(response: Response): Promise<string> {
   try {
     return await response.text();
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     return "";
   }
 }
 
-export async function searchOllamaWeb(options: SearchOllamaWebOptions): Promise<unknown> {
-  const fetchFunction = options.fetchImpl ?? fetch;
+async function postOllamaWeb(endpoint: string, init: RequestInit & { fetchImpl?: typeof fetch }): Promise<unknown> {
+  const fetchFunction = init.fetchImpl ?? fetch;
 
   let response: Response;
   try {
-    response = await fetchFunction(options.endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${options.apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ query: options.query, max_results: options.maxResults }),
-      signal: options.signal,
-    });
+    response = await fetchFunction(endpoint, init);
   } catch (error) {
-    throw new OllamaWebSearchError(`Failed to reach Ollama Web Search API: ${error instanceof Error ? error.message : String(error)}`, {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    throw new OllamaWebError(`Failed to reach Ollama Web API: ${error instanceof Error ? error.message : String(error)}`, {
       code: "network_error",
       cause: error,
     });
@@ -55,7 +71,7 @@ export async function searchOllamaWeb(options: SearchOllamaWebOptions): Promise<
   const body = await readResponseBody(response);
 
   if (!response.ok) {
-    throw new OllamaWebSearchError(`Ollama Web Search API returned HTTP ${response.status}${body ? `: ${body}` : ""}`, {
+    throw new OllamaWebError(`Ollama Web API returned HTTP ${response.status}${body ? `: ${body}` : ""}`, {
       code: "http_error",
       status: response.status,
       responseBody: body,
@@ -65,10 +81,36 @@ export async function searchOllamaWeb(options: SearchOllamaWebOptions): Promise<
   try {
     return body ? JSON.parse(body) : null;
   } catch (error) {
-    throw new OllamaWebSearchError("Ollama Web Search API returned invalid JSON", {
+    throw new OllamaWebError("Ollama Web API returned invalid JSON", {
       code: "invalid_json",
       responseBody: body,
       cause: error,
     });
   }
+}
+
+export async function searchOllamaWeb(options: SearchOllamaWebOptions): Promise<unknown> {
+  return postOllamaWeb(options.endpoint, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${options.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ query: options.query, max_results: options.maxResults }),
+    signal: options.signal,
+    fetchImpl: options.fetchImpl,
+  });
+}
+
+export async function fetchOllamaWeb(options: FetchOllamaWebOptions): Promise<unknown> {
+  return postOllamaWeb(options.endpoint, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${options.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ url: options.url }),
+    signal: options.signal,
+    fetchImpl: options.fetchImpl,
+  });
 }

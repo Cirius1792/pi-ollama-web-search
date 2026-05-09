@@ -1,7 +1,8 @@
 export interface OllamaSearchConfig {
   apiKey?: string;
   devMode: boolean;
-  endpoint: string;
+  searchEndpoint: string;
+  fetchEndpoint: string;
   maxResults: number;
   maxOutputChars: number;
 }
@@ -9,6 +10,7 @@ export interface OllamaSearchConfig {
 export type Env = Record<string, string | undefined>;
 
 export const OLLAMA_WEB_SEARCH_ENDPOINT = "https://ollama.com/api/web_search";
+export const OLLAMA_WEB_FETCH_ENDPOINT = "https://ollama.com/api/web_fetch";
 export const DEFAULT_MAX_RESULTS = 5;
 export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
 
@@ -26,7 +28,8 @@ export function loadConfig(env: Env = process.env): OllamaSearchConfig {
   return {
     apiKey: optionalTrimmed(env.OLLAMA_API_KEY),
     devMode: isTruthyEnv(env.PI_OLLAMA_SEARCH_DEV),
-    endpoint: OLLAMA_WEB_SEARCH_ENDPOINT,
+    searchEndpoint: OLLAMA_WEB_SEARCH_ENDPOINT,
+    fetchEndpoint: OLLAMA_WEB_FETCH_ENDPOINT,
     maxResults: DEFAULT_MAX_RESULTS,
     maxOutputChars: DEFAULT_MAX_OUTPUT_CHARS,
   };
