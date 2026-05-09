@@ -83,6 +83,20 @@ describe("normalizeWebFetchResponse", () => {
     });
   });
 
+  it("accepts null links and defaults to []", () => {
+    expect(
+      normalizeWebFetchResponse({
+        title: "Ollama",
+        content: "Content",
+        links: null,
+      }),
+    ).toEqual({
+      title: "Ollama",
+      content: "Content",
+      links: [],
+    });
+  });
+
   it("throws when links contains non-strings", () => {
     expect(() =>
       normalizeWebFetchResponse({
@@ -93,15 +107,7 @@ describe("normalizeWebFetchResponse", () => {
     ).toThrow("Unexpected Ollama web fetch response: links must contain only strings");
   });
 
-  it("throws when links is present but not an array (null)", () => {
-    expect(() =>
-      normalizeWebFetchResponse({
-        title: "Ollama",
-        content: "Content",
-        links: null,
-      }),
-    ).toThrow("Unexpected Ollama web fetch response: links must be an array");
-  });
+
 
   it("throws when links is present but not an array (object)", () => {
     expect(() =>

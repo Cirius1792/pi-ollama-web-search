@@ -77,7 +77,7 @@ export function normalizeWebFetchResponse(raw: unknown): NormalizedFetchResponse
   }
 
   let linksArray: string[];
-  if (links === undefined) {
+  if (links === undefined || links === null) {
     linksArray = [];
   } else if (Array.isArray(links)) {
     if (!links.every((link) => typeof link === "string")) {
