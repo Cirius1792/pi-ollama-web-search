@@ -8,6 +8,12 @@ export interface NormalizedSearchResponse {
   results: NormalizedSearchResult[];
 }
 
+export interface NormalizedFetchResponse {
+  title: string;
+  content: string;
+  links: string[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -52,5 +58,39 @@ export function normalizeWebSearchResponse(raw: unknown): NormalizedSearchRespon
         content: normalizeContent(requireString(item, "content", resultNumber)),
       };
     }),
+  };
+}
+
+export function normalizeWebFetchResponse(raw: unknown): NormalizedFetchResponse {
+  if (!isRecord(raw)) {
+    throw new Error("Unexpected Ollama web fetch response: response must be an object");
+  }
+
+  const { title, content, links } = raw;
+
+  if (typeof title !== "string") {
+    throw new Error("Unexpected Ollama web fetch response: title must be a string");
+  }
+
+  if (typeof content !== "string") {
+    throw new Error("Unexpected Ollama web fetch response: content must be a string");
+  }
+
+  let linksArray: string[];
+  if (links === undefined) {
+    linksArray = [];
+  } else if (Array.isArray(links)) {
+    if (!links.every((link) => typeof link === "string")) {
+      throw new Error("Unexpected Ollama web fetch response: links must contain only strings");
+    }
+    linksArray = links;
+  } else {
+    throw new Error("Unexpected Ollama web fetch response: links must be an array");
+  }
+
+  return {
+    title: normalizeCompactText(title),
+    content: normalizeContent(content),
+    links: linksArray.map((link) => normalizeCompactText(link)),
   };
 }

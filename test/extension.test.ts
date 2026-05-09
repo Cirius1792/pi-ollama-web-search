@@ -37,12 +37,12 @@ beforeEach(() => {
 });
 
 describe("extension", () => {
-  it("always registers the production search tool", () => {
+  it("registers search and fetch production tools", () => {
     const fake = createFakePi();
     extension(fake.pi as any);
 
-    expect(fake.pi.registerTool).toHaveBeenCalledOnce();
-    expect(fake.tools[0].name).toBe("ollama_web_search");
+    expect(fake.pi.registerTool).toHaveBeenCalledTimes(2);
+    expect(fake.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["ollama_web_search", "ollama_web_fetch"]));
   });
 
   it("does not register the debug command by default", () => {
@@ -52,13 +52,15 @@ describe("extension", () => {
     expect(fake.pi.registerCommand).not.toHaveBeenCalled();
   });
 
-  it("registers the debug command when dev mode is enabled", () => {
+  it("registers search and fetch debug commands when dev mode is enabled", () => {
     process.env.PI_OLLAMA_SEARCH_DEV = "1";
     const fake = createFakePi();
     extension(fake.pi as any);
 
     expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-search", expect.any(Object));
+    expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-fetch", expect.any(Object));
     expect(fake.commands["ollama-search"].description).toContain("debug");
+    expect(fake.commands["ollama-fetch"].description).toContain("debug");
   });
 
   it("registers a session_start warning for missing API key", async () => {
