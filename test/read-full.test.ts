@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runOllamaWebReadFull } from "../src/read-full.js";
 import { clearFullContentStore, createFullContentRef, rememberSearchContent } from "../src/store.js";
 
@@ -7,7 +7,7 @@ describe("runOllamaWebReadFull", () => {
     clearFullContentStore();
   });
 
-  it("rejects invalid section values explicitly", () => {
+  it("rejects invalid section values explicitly for search refs", async () => {
     const ref = createFullContentRef("search");
     rememberSearchContent({
       ref,
@@ -18,8 +18,11 @@ describe("runOllamaWebReadFull", () => {
       },
     });
 
-    expect(() => runOllamaWebReadFull({ ref, section: "summary" as any, resultIndex: 1 })).toThrow(
-      "section must be one of: title, url, content.",
-    );
+    await expect(
+      runOllamaWebReadFull(
+        { ref, section: "summary" as any, resultIndex: 1 },
+        { readFullFetchContent: vi.fn(async () => ({ mode: "inline", text: "", details: {} as any })) },
+      ),
+    ).rejects.toThrow("section must be one of: title, url, content.");
   });
 });

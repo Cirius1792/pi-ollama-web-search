@@ -2,6 +2,7 @@ import type { NormalizedFetchResponse, NormalizedSearchResponse } from "./normal
 
 export interface FormatOptions {
   maxOutputChars: number;
+  fullContentRef?: string;
 }
 
 export interface SearchFormatOptions extends FormatOptions {
@@ -131,7 +132,11 @@ function getSearchOmissionNotice(fullContentRef?: string): string {
   return "Additional search results were omitted from visible output. See details for omitted result targets.";
 }
 
-function getFetchTruncationNotice(maxOutputChars: number): string {
+function getFetchTruncationNotice(maxOutputChars: number, fullContentRef?: string): string {
+  if (fullContentRef) {
+    return `[Output truncated to ${maxOutputChars} characters to protect pi context. Use ollama_web_read_full with fullContentRef: ${fullContentRef}.]`;
+  }
+
   return `[Output truncated to ${maxOutputChars} characters to protect pi context. See details for retrieval metadata.]`;
 }
 
@@ -294,7 +299,7 @@ export function formatFetchResultWithMetadata(response: NormalizedFetchResponse,
     };
   }
 
-  const notice = getFetchTruncationNotice(options.maxOutputChars);
+  const notice = getFetchTruncationNotice(options.maxOutputChars, options.fullContentRef);
   const noticeBlock = `\n\n${notice}`;
 
   let visibleTitleChars = response.title.length;

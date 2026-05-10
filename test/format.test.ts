@@ -175,11 +175,12 @@ describe("formatFetchResult", () => {
         content: "x".repeat(500),
         links: ["https://example.com/1", "https://example.com/2"],
       },
-      { maxOutputChars: 180 },
+      { maxOutputChars: 180, fullContentRef: "fetch:test-ref" },
     );
 
     expect(text.length).toBeLessThanOrEqual(180);
     expect(text).toContain("[Output truncated to 180 characters");
+    expect(text).toContain("Use ollama_web_read_full with fullContentRef: fetch:test-ref");
   });
 
   it("preserves links when content is truncated", () => {
@@ -189,11 +190,25 @@ describe("formatFetchResult", () => {
         content: "x".repeat(1000),
         links: ["https://example.com/1", "https://example.com/2"],
       },
-      { maxOutputChars: 500 },
+      { maxOutputChars: 500, fullContentRef: "fetch:ref-2" },
     );
 
     expect(text).toContain("Links:");
     expect(text).toContain("[1] https://example.com/1");
     expect(text).toContain("[2] https://example.com/2");
+  });
+
+  it("does not mention read-full retrieval when output is not truncated", () => {
+    const text = formatFetchResult(
+      {
+        title: "Short",
+        content: "Small content",
+        links: ["https://example.com/1"],
+      },
+      { maxOutputChars: 10_000, fullContentRef: "fetch:no-truncation" },
+    );
+
+    expect(text).not.toContain("ollama_web_read_full");
+    expect(text).not.toContain("fetch:no-truncation");
   });
 });

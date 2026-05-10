@@ -1,31 +1,52 @@
+import { FETCH_RETRIEVAL_SECTIONS, type ReadFullFetchResult, type ReadFullFetchParams } from "./retrieval.js";
 import { getStoredFullContent } from "./store.js";
 
-export type ReadFullSection = "title" | "url" | "content";
+export type ReadFullSearchSection = "title" | "url" | "content";
+export type ReadFullFetchSection = (typeof FETCH_RETRIEVAL_SECTIONS)[number];
+export type ReadFullSection = ReadFullSearchSection | ReadFullFetchSection;
 
-const READ_FULL_SECTIONS: readonly ReadFullSection[] = ["title", "url", "content"];
+const SEARCH_READ_FULL_SECTIONS: readonly ReadFullSearchSection[] = ["title", "url", "content"];
 
-function isReadFullSection(value: unknown): value is ReadFullSection {
-  return typeof value === "string" && (READ_FULL_SECTIONS as readonly string[]).includes(value);
+function isSearchReadFullSection(value: unknown): value is ReadFullSearchSection {
+  return typeof value === "string" && (SEARCH_READ_FULL_SECTIONS as readonly string[]).includes(value);
+}
+
+function isFetchReadFullSection(value: unknown): value is ReadFullFetchSection {
+  return typeof value === "string" && (FETCH_RETRIEVAL_SECTIONS as readonly string[]).includes(value);
 }
 
 export interface RunOllamaWebReadFullInput {
-  ref: string;
+  ref?: string;
+  fullContentRef?: string;
   section?: ReadFullSection;
   resultIndex?: number;
+  mode?: "inline" | "file";
   offset?: number;
   maxChars?: number;
+  outputPath?: string;
+  signal?: AbortSignal;
 }
 
-export interface RunOllamaWebReadFullResult {
+export interface RunOllamaWebReadFullInlineResult {
+  mode: "inline";
   text: string;
-  details: {
-    ref: string;
-    kind: "search";
-    section: "title" | "url" | "content";
-    resultIndex?: number;
-    servedFrom: "cache";
-  };
+  details:
+    | {
+        ref: string;
+        kind: "search";
+        section: ReadFullSearchSection;
+        resultIndex: number;
+        servedFrom: "cache";
+      }
+    | ReadFullFetchResult["details"];
 }
+
+export interface RunOllamaWebReadFullFileResult {
+  mode: "file";
+  details: ReadFullFetchResult["details"];
+}
+
+export type RunOllamaWebReadFullResult = RunOllamaWebReadFullInlineResult | RunOllamaWebReadFullFileResult;
 
 function sliceByOffsetAndMaxChars(value: string, offset: number, maxChars?: number): string {
   if (maxChars === undefined) {
@@ -34,24 +55,77 @@ function sliceByOffsetAndMaxChars(value: string, offset: number, maxChars?: numb
   return value.slice(offset, offset + maxChars);
 }
 
-export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllamaWebReadFullResult {
-  const offset = input.offset ?? 0;
-  if (!Number.isInteger(offset) || offset < 0) {
-    throw new Error("Offset must be an integer greater than or equal to 0.");
+function getRefValue(input: RunOllamaWebReadFullInput): string {
+  const ref = (input.ref ?? input.fullContentRef)?.trim();
+  if (!ref) {
+    throw new Error("ref is required.");
+  }
+  return ref;
+}
+
+function validateInlineIntegerInput(name: string, value: number | undefined, minimum: number): void {
+  if (value === undefined) {
+    return;
   }
 
-  if (input.maxChars !== undefined && (!Number.isInteger(input.maxChars) || input.maxChars < 1)) {
-    throw new Error("maxChars must be an integer greater than or equal to 1.");
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer greater than or equal to ${minimum}.`);
+  }
+}
+
+export async function runOllamaWebReadFull(
+  input: RunOllamaWebReadFullInput,
+  options: {
+    readFullFetchContent: (params: ReadFullFetchParams) => Promise<ReadFullFetchResult>;
+  },
+): Promise<RunOllamaWebReadFullResult> {
+  const ref = getRefValue(input);
+
+  validateInlineIntegerInput("Offset", input.offset, 0);
+  validateInlineIntegerInput("maxChars", input.maxChars, 1);
+
+  if (ref.startsWith("fetch:")) {
+    const section = input.section ?? "content";
+    if (!isFetchReadFullSection(section)) {
+      throw new Error("section must be one of: title, content, links.");
+    }
+
+    const fetchResult = await options.readFullFetchContent({
+      fullContentRef: ref,
+      section,
+      mode: input.mode,
+      offset: input.offset,
+      maxChars: input.maxChars,
+      outputPath: input.outputPath,
+      signal: input.signal,
+    });
+
+    if (fetchResult.mode === "file") {
+      return {
+        mode: "file",
+        details: fetchResult.details,
+      };
+    }
+
+    return {
+      mode: "inline",
+      text: fetchResult.text,
+      details: fetchResult.details,
+    };
+  }
+
+  if (input.mode === "file") {
+    throw new Error("mode=file is only supported for fetch refs.");
   }
 
   const section = input.section ?? "content";
-  if (!isReadFullSection(section)) {
+  if (!isSearchReadFullSection(section)) {
     throw new Error("section must be one of: title, url, content.");
   }
 
-  const stored = getStoredFullContent(input.ref);
+  const stored = getStoredFullContent(ref);
   if (!stored) {
-    throw new Error(`No stored content found for ref ${input.ref}.`);
+    throw new Error(`No stored content found for ref ${ref}.`);
   }
 
   if (stored.kind === "search") {
@@ -69,9 +143,10 @@ export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllam
     const text = section === "title" ? selected.title : section === "url" ? selected.url : selected.content;
 
     return {
-      text: sliceByOffsetAndMaxChars(text, offset, input.maxChars),
+      mode: "inline",
+      text: sliceByOffsetAndMaxChars(text, input.offset ?? 0, input.maxChars),
       details: {
-        ref: input.ref,
+        ref,
         kind: "search",
         section,
         resultIndex: input.resultIndex,
@@ -80,9 +155,5 @@ export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllam
     };
   }
 
-  if (input.resultIndex !== undefined) {
-    throw new Error("resultIndex is only valid for search refs.");
-  }
-
-  throw new Error("Fetch refs are not supported by this retrieval slice.");
+  throw new Error("Fetch refs are not supported by this retrieval instance.");
 }

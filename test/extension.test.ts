@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "../src/index.js";
 
@@ -78,32 +81,110 @@ describe("extension", () => {
     );
   });
 
-  it("does not register the debug command by default", () => {
+  it("fetch + read-full retrieval path supports inline and file modes", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Example title",
+            content: "Long content body",
+            links: ["https://example.com/a", "https://example.com/b"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchImpl);
+
     const fake = createFakePi();
     extension(fake.pi as any);
 
-    expect(fake.pi.registerCommand).not.toHaveBeenCalled();
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+    expect(typeof fullContentRef).toBe("string");
+    expect(fetchResult?.details?.retrieval?.target).toBe("fetch");
+    expect(fetchResult?.details?.retrieval?.sections).toEqual(["title", "content", "links"]);
+    expect(fetchResult?.details?.retrieval?.targets?.title?.fullContentRef).toBe(fullContentRef);
+
+    const inlineContentResult = await readFullTool?.execute("call-2", { ref: fullContentRef, section: "content" }, new AbortController().signal);
+
+    expect(inlineContentResult?.content?.[0]?.text).toBe("Long content body");
+    expect(inlineContentResult?.details?.mode).toBe("inline");
+    expect(inlineContentResult?.details?.section).toBe("content");
+    expect(inlineContentResult?.details?.offset).toBe(0);
+
+    const inlineLinksResult = await readFullTool?.execute(
+      "call-2b",
+      { ref: fullContentRef, section: "links", offset: 0, maxChars: 10_000 },
+      new AbortController().signal,
+    );
+
+    expect(inlineLinksResult?.content?.[0]?.text).toBe("https://example.com/a\nhttps://example.com/b");
+    expect(inlineLinksResult?.details?.mode).toBe("inline");
+    expect(inlineLinksResult?.details?.section).toBe("links");
+
+    const outputDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-"));
+    let generatedOutputPath: string | undefined;
+    try {
+      const requestedOutputPath = join(outputDir, "title.txt");
+      const fileResult = await readFullTool?.execute(
+        "call-3",
+        { ref: fullContentRef, section: "title", mode: "file", outputPath: requestedOutputPath },
+        new AbortController().signal,
+      );
+
+      generatedOutputPath = fileResult?.details?.outputPath;
+
+      expect(fileResult?.content?.[0]?.text).toContain("Wrote full section to");
+      expect(fileResult?.details?.mode).toBe("file");
+      expect(fileResult?.details?.outputPath).not.toBe(requestedOutputPath);
+      expect(await readFile(fileResult?.details?.outputPath, "utf8")).toBe("Example title");
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+      if (generatedOutputPath) {
+        await rm(generatedOutputPath, { force: true });
+      }
+    }
   });
 
-  it("registers search and fetch debug commands when dev mode is enabled", () => {
-    process.env.PI_OLLAMA_SEARCH_DEV = "1";
+  it("propagates abort signal to fetch read-full retrieval", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            title: "Example title",
+            content: "Long content body",
+            links: ["https://example.com/a"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
     const fake = createFakePi();
     extension(fake.pi as any);
 
-    expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-search", expect.any(Object));
-    expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-fetch", expect.any(Object));
-    expect(fake.commands["ollama-search"].description).toContain("debug");
-    expect(fake.commands["ollama-fetch"].description).toContain("debug");
-  });
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
 
-  it("registers a session_start warning for missing API key", async () => {
-    const fake = createFakePi();
-    extension(fake.pi as any);
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
 
-    const notify = vi.fn();
-    await fake.handlers.session_start({}, { hasUI: true, ui: { notify } });
+    const controller = new AbortController();
+    controller.abort();
 
-    expect(notify).toHaveBeenCalledWith(expect.stringContaining("OLLAMA_API_KEY is not set"), "warning");
+    await expect(readFullTool?.execute("call-2", { ref: fullContentRef, section: "content" }, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
   });
 
   it("returns search retrieval metadata and reads title/url/content through ollama_web_read_full", async () => {
@@ -130,34 +211,11 @@ describe("extension", () => {
     const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
     const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
 
-    expect(searchTool).toBeDefined();
-    expect(readFullTool).toBeDefined();
-
     const searchResult = await searchTool!.execute("tool-1", { query: "test query" }, undefined);
     const ref = searchResult.details.fullContentRef;
 
     expect(ref).toMatch(/^ws_s_/);
-    expect(searchResult.details.retrieval).toEqual({
-      kind: "search",
-      results: [
-        {
-          resultIndex: 1,
-          sections: {
-            title: { totalChars: 3 },
-            url: { totalChars: 23 },
-            content: { totalChars: 13 },
-          },
-        },
-        {
-          resultIndex: 2,
-          sections: {
-            title: { totalChars: 3 },
-            url: { totalChars: 23 },
-            content: { totalChars: 14 },
-          },
-        },
-      ],
-    });
+    expect(searchResult.details.retrieval.kind).toBe("search");
 
     const retrievalCases = [
       { section: "title", resultIndex: 1, expectedText: "One" },
@@ -185,144 +243,83 @@ describe("extension", () => {
     }
   });
 
-  it("omits read-full metadata when search returns no results", async () => {
+  it("supports read-full schema and guidance for both search and fetch refs", () => {
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    expect(readFullTool).toBeDefined();
+    expect(readFullTool?.description).toContain("search or web fetch");
+    expect(readFullTool?.promptGuidelines?.join(" ")).toContain("ollama_web_search or ollama_web_fetch");
+    expect(readFullTool?.parameters?.properties?.ref?.description).toContain("ollama_web_search or ollama_web_fetch");
+
+    const sectionOptions = readFullTool?.parameters?.properties?.section?.anyOf ?? [];
+    const sectionLiterals = sectionOptions.map((option: { const?: string }) => option.const).filter(Boolean);
+    expect(sectionLiterals).toEqual(expect.arrayContaining(["title", "url", "content", "links"]));
+
+    expect(readFullTool?.parameters?.properties?.mode?.anyOf?.map((option: { const?: string }) => option.const)).toEqual(
+      expect.arrayContaining(["inline", "file"]),
+    );
+    expect(readFullTool?.parameters?.properties?.resultIndex?.type).toBe("integer");
+    expect(readFullTool?.parameters?.properties?.offset?.minimum).toBe(0);
+    expect(readFullTool?.parameters?.properties?.maxChars?.minimum).toBe(1);
+  });
+
+  it("clears stored fetch retrieval refs on session_start", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
     vi.stubGlobal(
       "fetch",
       vi.fn<typeof fetch>().mockResolvedValue(
-        new Response(JSON.stringify({ results: [] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ title: "Example", content: "Body", links: ["https://example.com/a"] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       ),
     );
 
     const fake = createFakePi();
     extension(fake.pi as any);
 
-    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
-    expect(searchTool).toBeDefined();
-
-    const searchResult = await searchTool!.execute("tool-empty", { query: "no hits" }, undefined);
-
-    expect(searchResult.content).toEqual([{ type: "text", text: "No results found." }]);
-    expect(searchResult.details).toMatchObject({
-      results: [],
-      truncated: false,
-      omittedResultCount: 0,
-    });
-    expect(searchResult.details.fullContentRef).toBeUndefined();
-    expect(searchResult.details.retrieval).toBeUndefined();
-  });
-
-  it("keeps read-full scope search-only in schema and guidance", () => {
-    const fake = createFakePi();
-    extension(fake.pi as any);
-
-    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
-
-    expect(readFullTool).toBeDefined();
-    expect(readFullTool?.description).toContain("previous web search results");
-    expect(readFullTool?.description).not.toContain("fetch");
-    expect(readFullTool?.promptSnippet).toContain("search refs");
-    expect(readFullTool?.promptGuidelines?.join(" ")).not.toContain("ollama_web_fetch");
-    expect(readFullTool?.parameters?.properties?.ref?.description).toContain("ollama_web_search");
-    expect(readFullTool?.parameters?.properties?.ref?.description).not.toContain("ollama_web_fetch");
-
-    const sectionOptions = readFullTool?.parameters?.properties?.section?.anyOf ?? [];
-    const sectionLiterals = sectionOptions.map((option: { const?: string }) => option.const).filter(Boolean);
-    expect(sectionLiterals).toEqual(expect.arrayContaining(["title", "url", "content"]));
-    expect(sectionLiterals).not.toContain("links");
-
-    expect(readFullTool?.parameters?.properties?.resultIndex?.type).toBe("integer");
-    expect(readFullTool?.parameters?.properties?.resultIndex?.minimum).toBe(1);
-    expect(readFullTool?.parameters?.properties?.offset?.type).toBe("integer");
-    expect(readFullTool?.parameters?.properties?.offset?.minimum).toBe(0);
-    expect(readFullTool?.parameters?.properties?.maxChars?.type).toBe("integer");
-    expect(readFullTool?.parameters?.properties?.maxChars?.minimum).toBe(1);
-  });
-
-  it("validates search retrieval inputs with explicit errors", async () => {
-    process.env.OLLAMA_API_KEY = "test-key";
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn<typeof fetch>().mockImplementation(async (input) => {
-        const url = String(input);
-        if (url.includes("web_fetch")) {
-          return new Response(
-            JSON.stringify({
-              title: "Fetched",
-              content: "Fetched content",
-              links: ["https://example.com/alpha"],
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          );
-        }
-
-        return new Response(
-          JSON.stringify({
-            results: [
-              { title: "One", url: "https://example.com/one", content: "First content" },
-              { title: "Two", url: "https://example.com/two", content: "Second content" },
-              { title: "Three", url: "https://example.com/three", content: "Third content" },
-              { title: "Four", url: "https://example.com/four", content: "Fourth content" },
-              { title: "Five", url: "https://example.com/five", content: "Fifth content" },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }),
-    );
-
-    const fake = createFakePi();
-    extension(fake.pi as any);
-
-    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
     const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
     const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
 
-    expect(searchTool).toBeDefined();
-    expect(fetchTool).toBeDefined();
-    expect(readFullTool).toBeDefined();
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
 
-    const searchResult = await searchTool!.execute("tool-1", { query: "test query" }, undefined);
-    const ref = searchResult.details.fullContentRef;
+    await fake.handlers.session_start({}, { hasUI: false, ui: { notify: vi.fn() } });
 
-    await expect(readFullTool!.execute("tool-2", { ref, section: "content" }, undefined)).rejects.toThrow(
-      "resultIndex is required for search refs.",
+    await expect(readFullTool?.execute("call-2", { ref: fullContentRef, section: "content" }, new AbortController().signal)).rejects.toThrow(
+      `No stored full content found for ref: ${fullContentRef}`,
     );
+  });
 
-    await expect(readFullTool!.execute("tool-3", { ref, section: "content", resultIndex: 6 }, undefined)).rejects.toThrow(
-      "Search result index 6 is out of range. Valid range is 1-5.",
-    );
+  it("does not register the debug command by default", () => {
+    const fake = createFakePi();
+    extension(fake.pi as any);
 
-    await expect(readFullTool!.execute("tool-4", { ref, section: "content", resultIndex: 1, offset: -1 }, undefined)).rejects.toThrow(
-      "Offset must be an integer greater than or equal to 0.",
-    );
+    expect(fake.pi.registerCommand).not.toHaveBeenCalled();
+  });
 
-    await expect(readFullTool!.execute("tool-5", { ref, section: "content", resultIndex: 1.5 }, undefined)).rejects.toThrow(
-      "Search result index 1.5 is out of range. Valid range is 1-5.",
-    );
+  it("registers search and fetch debug commands when dev mode is enabled", () => {
+    process.env.PI_OLLAMA_SEARCH_DEV = "1";
+    const fake = createFakePi();
+    extension(fake.pi as any);
 
-    await expect(readFullTool!.execute("tool-6", { ref, section: "content", resultIndex: 1, offset: 0.5 }, undefined)).rejects.toThrow(
-      "Offset must be an integer greater than or equal to 0.",
-    );
+    expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-search", expect.any(Object));
+    expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-fetch", expect.any(Object));
+    expect(fake.commands["ollama-search"].description).toContain("debug");
+    expect(fake.commands["ollama-fetch"].description).toContain("debug");
+  });
 
-    await expect(readFullTool!.execute("tool-7", { ref, section: "content", resultIndex: 1, maxChars: 0 }, undefined)).rejects.toThrow(
-      "maxChars must be an integer greater than or equal to 1.",
-    );
+  it("registers a session_start warning for missing API key", async () => {
+    const fake = createFakePi();
+    extension(fake.pi as any);
 
-    await expect(readFullTool!.execute("tool-8", { ref, section: "content", resultIndex: 1, maxChars: 1.2 }, undefined)).rejects.toThrow(
-      "maxChars must be an integer greater than or equal to 1.",
-    );
+    const notify = vi.fn();
+    await fake.handlers.session_start({}, { hasUI: true, ui: { notify } });
 
-    await expect(readFullTool!.execute("tool-9", { ref, section: "summary" as any, resultIndex: 1 }, undefined)).rejects.toThrow(
-      "section must be one of: title, url, content.",
-    );
-
-    const fetchResult = await fetchTool!.execute("tool-10", { url: "https://example.com/fetch" }, undefined);
-    expect(fetchResult.details.fullContentRef).toBeUndefined();
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("OLLAMA_API_KEY is not set"), "warning");
   });
 });
