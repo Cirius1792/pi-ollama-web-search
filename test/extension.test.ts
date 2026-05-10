@@ -248,6 +248,96 @@ describe("extension", () => {
     }
   });
 
+  it("validates search read-full errors end-to-end through the registered tool", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            results: [
+              { title: "One", url: "https://example.com/one", content: "First content" },
+              { title: "Two", url: "https://example.com/two", content: "Second content" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResult = await searchTool!.execute("tool-1", { query: "test query" }, undefined);
+    const ref = searchResult.details.fullContentRef;
+
+    await expect(readFullTool!.execute("tool-missing-index", { ref, section: "content" }, undefined)).rejects.toThrow(
+      "resultIndex is required for search refs.",
+    );
+
+    await expect(
+      readFullTool!.execute("tool-invalid-section", { ref, section: "links" as any, resultIndex: 1 }, undefined),
+    ).rejects.toThrow("section must be one of: title, url, content.");
+
+    await expect(readFullTool!.execute("tool-out-of-range", { ref, section: "content", resultIndex: 3 }, undefined)).rejects.toThrow(
+      "Search result index 3 is out of range. Valid range is 1-2.",
+    );
+
+    await expect(readFullTool!.execute("tool-file-mode", { ref, section: "content", resultIndex: 1, mode: "file" }, undefined)).rejects.toThrow(
+      "mode=file is only supported for fetch refs.",
+    );
+
+    await expect(
+      readFullTool!.execute("tool-bad-ref", { ref: "ws_s_missing", section: "content", resultIndex: 1 }, undefined),
+    ).rejects.toThrow("No stored content found for ref ws_s_missing.");
+  });
+
+  it("isolates search retrieval refs between extension instances and clears them on session_start", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            results: [{ title: "One", url: "https://example.com/one", content: "First content" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const fakeA = createFakePi();
+    const fakeB = createFakePi();
+    extension(fakeA.pi as any);
+    extension(fakeB.pi as any);
+
+    const searchToolA = fakeA.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullToolA = fakeA.tools.find((tool) => tool.name === "ollama_web_read_full");
+    const readFullToolB = fakeB.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResultA = await searchToolA!.execute("tool-search-a", { query: "query a" }, undefined);
+    const refA = searchResultA.details.fullContentRef;
+
+    await expect(readFullToolB!.execute("tool-read-b", { ref: refA, section: "content", resultIndex: 1 }, undefined)).rejects.toThrow(
+      `No stored content found for ref ${refA}.`,
+    );
+
+    await expect(readFullToolA!.execute("tool-read-a", { ref: refA, section: "content", resultIndex: 1 }, undefined)).resolves.toMatchObject({
+      content: [{ type: "text", text: "First content" }],
+    });
+
+    await fakeA.handlers.session_start({}, { hasUI: false, ui: { notify: vi.fn() } });
+
+    await expect(readFullToolA!.execute("tool-read-a-after-clear", { ref: refA, section: "content", resultIndex: 1 }, undefined)).rejects.toThrow(
+      `No stored content found for ref ${refA}.`,
+    );
+  });
+
   it("supports read-full schema and guidance for both search and fetch refs", () => {
     const fake = createFakePi();
     extension(fake.pi as any);
@@ -300,36 +390,6 @@ describe("extension", () => {
     );
   });
 
-  it("clears stored fetch retrieval refs on session_start", async () => {
-    process.env.OLLAMA_API_KEY = "test-key";
-
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          title: "Example title",
-          content: "Long content body",
-          links: ["https://example.com/a", "https://example.com/b"],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-    vi.stubGlobal("fetch", fetchImpl);
-
-    const fake = createFakePi();
-    extension(fake.pi as any);
-
-    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
-    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
-
-    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
-    const fullContentRef = fetchResult?.details?.fullContentRef;
-
-    await fake.handlers.session_start({}, { hasUI: false, ui: { notify: vi.fn() } });
-
-    await expect(
-      readFullTool?.execute("call-2", { fullContentRef, section: "content" }, new AbortController().signal),
-    ).rejects.toThrow(`No stored full content found for ref: ${fullContentRef}`);
-  });
 
   it("isolates fetch retrieval refs between extension instances", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
@@ -359,13 +419,13 @@ describe("extension", () => {
     const fullContentRefA = fetchResultA?.details?.fullContentRef;
 
     await expect(
-      readFullToolB?.execute("call-2", { fullContentRef: fullContentRefA, section: "content" }, new AbortController().signal),
+      readFullToolB?.execute("call-2", { ref: fullContentRefA, section: "content" }, new AbortController().signal),
     ).rejects.toThrow(`No stored full content found for ref: ${fullContentRefA}`);
 
     await fakeB.handlers.session_start({}, { hasUI: false, ui: { notify: vi.fn() } });
 
     await expect(
-      readFullToolA?.execute("call-3", { fullContentRef: fullContentRefA, section: "content" }, new AbortController().signal),
+      readFullToolA?.execute("call-3", { ref: fullContentRefA, section: "content" }, new AbortController().signal),
     ).resolves.toMatchObject({
       content: [{ type: "text", text: "Long content body" }],
     });

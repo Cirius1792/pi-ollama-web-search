@@ -1,15 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runOllamaWebReadFull } from "../src/read-full.js";
-import { clearFullContentStore, createFullContentRef, rememberSearchContent } from "../src/store.js";
+import { createFullContentRef, createSearchContentStore } from "../src/store.js";
 
 describe("runOllamaWebReadFull", () => {
-  afterEach(() => {
-    clearFullContentStore();
-  });
-
   it("rejects invalid section values explicitly for search refs", async () => {
+    const searchContentStore = createSearchContentStore();
     const ref = createFullContentRef("search");
-    rememberSearchContent({
+    searchContentStore.rememberSearchContent({
       ref,
       query: "test query",
       maxResults: 5,
@@ -35,6 +32,7 @@ describe("runOllamaWebReadFull", () => {
               returnedChars: 0,
             },
           })),
+          getStoredSearchContent: searchContentStore.getStoredSearchContent,
         },
       ),
     ).rejects.toThrow("section must be one of: title, url, content.");

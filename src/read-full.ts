@@ -1,5 +1,5 @@
 import { FETCH_RETRIEVAL_SECTIONS, type ReadFullFetchResult, type ReadFullFetchParams } from "./retrieval.js";
-import { getStoredFullContent } from "./store.js";
+import type { StoredSearchContent } from "./store.js";
 
 export type ReadFullSearchSection = "title" | "url" | "content";
 export type ReadFullFetchSection = (typeof FETCH_RETRIEVAL_SECTIONS)[number];
@@ -80,6 +80,7 @@ export async function runOllamaWebReadFull(
   input: RunOllamaWebReadFullInput,
   options: {
     readFullFetchContent: (params: ReadFullFetchParams) => Promise<ReadFullFetchResult>;
+    getStoredSearchContent: (ref: string) => StoredSearchContent | undefined;
   },
 ): Promise<RunOllamaWebReadFullResult> {
   const ref = getRefValue(input);
@@ -126,7 +127,7 @@ export async function runOllamaWebReadFull(
     throw new Error("section must be one of: title, url, content.");
   }
 
-  const stored = getStoredFullContent(ref);
+  const stored = options.getStoredSearchContent(ref);
   if (!stored) {
     throw new Error(`No stored content found for ref ${ref}.`);
   }

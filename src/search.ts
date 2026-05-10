@@ -1,13 +1,14 @@
 import { getMissingApiKeyMessage, type OllamaSearchConfig } from "./config.js";
 import { searchOllamaWeb } from "./client.js";
 import { formatSearchResultsWithMetadata, type SearchTruncationMetadata } from "./format.js";
-import { normalizeWebSearchResponse } from "./normalize.js";
-import { buildSearchRetrievalMetadata, createFullContentRef, type SearchRetrievalMetadata, rememberSearchContent } from "./store.js";
+import { normalizeWebSearchResponse, type NormalizedSearchResponse } from "./normalize.js";
+import { buildSearchRetrievalMetadata, createFullContentRef, type SearchRetrievalMetadata } from "./store.js";
 
 export interface RunOllamaWebSearchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  rememberSearchContent?: (input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }) => void;
 }
 
 export interface SearchResultDetails {
@@ -65,7 +66,7 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
   }
 
   const fullContentRef = createFullContentRef("search");
-  rememberSearchContent({
+  options.rememberSearchContent?.({
     ref: fullContentRef,
     query: trimmedQuery,
     maxResults: options.config.maxResults,

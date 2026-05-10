@@ -5,6 +5,7 @@ import { runOllamaWebFetch } from "./fetch.js";
 import { runOllamaWebReadFull } from "./read-full.js";
 import { createFetchRetrievalStore } from "./retrieval.js";
 import { formatOllamaWebError, runOllamaWebSearch } from "./search.js";
+import { createSearchContentStore } from "./store.js";
 
 const SearchParams = Type.Object({
   query: Type.String({ description: "The web search query to send to Ollama." }),
@@ -41,6 +42,7 @@ const ReadFullParams = Type.Object({
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
   const fetchRetrievalStore = createFetchRetrievalStore();
+  const searchContentStore = createSearchContentStore();
 
   pi.registerTool({
     name: "ollama_web_search",
@@ -56,7 +58,11 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     parameters: SearchParams,
 
     async execute(_toolCallId, params, signal) {
-      const result = await runOllamaWebSearch(params.query, { config, signal });
+      const result = await runOllamaWebSearch(params.query, {
+        config,
+        signal,
+        rememberSearchContent: searchContentStore.rememberSearchContent,
+      });
       return {
         content: [{ type: "text", text: result.formatted }],
         details: {
@@ -110,7 +116,13 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     parameters: ReadFullParams,
 
     async execute(_toolCallId, params, signal): Promise<any> {
-      const result = await runOllamaWebReadFull({ ...params, signal }, { readFullFetchContent: fetchRetrievalStore.readFullFetchContent });
+      const result = await runOllamaWebReadFull(
+        { ...params, signal },
+        {
+          readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
+          getStoredSearchContent: searchContentStore.getStoredSearchContent,
+        },
+      );
 
       if (result.mode === "file") {
         return {
@@ -131,7 +143,11 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
       description: "Run an Ollama web search debug request. Enabled by PI_OLLAMA_SEARCH_DEV.",
       handler: async (args, ctx) => {
         try {
-          const result = await runOllamaWebSearch(args, { config, signal: ctx.signal });
+          const result = await runOllamaWebSearch(args, {
+            config,
+            signal: ctx.signal,
+            rememberSearchContent: searchContentStore.rememberSearchContent,
+          });
           pi.sendMessage({
             customType: "ollama-web-search-debug",
             content: result.formatted,
@@ -175,6 +191,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     fetchRetrievalStore.clearFetchRetrievalStore();
+    searchContentStore.clearSearchContentStore();
 
     if (!config.apiKey && ctx.hasUI) {
       ctx.ui.notify(getMissingApiKeyMessage(), "warning");

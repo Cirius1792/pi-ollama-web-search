@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearFullContentStore, createFullContentRef, getStoredFullContent, rememberSearchContent } from "../src/store.js";
+import { createFullContentRef, createSearchContentStore } from "../src/store.js";
+
+const searchContentStore = createSearchContentStore();
 
 function rememberSearchEntry(ref: string, marker: string): void {
-  rememberSearchContent({
+  searchContentStore.rememberSearchContent({
     ref,
     query: `query-${marker}`,
     maxResults: 5,
@@ -14,11 +16,11 @@ function rememberSearchEntry(ref: string, marker: string): void {
 
 describe("full content store", () => {
   beforeEach(() => {
-    clearFullContentStore();
+    searchContentStore.clearSearchContentStore();
   });
 
   afterEach(() => {
-    clearFullContentStore();
+    searchContentStore.clearSearchContentStore();
     vi.useRealTimers();
   });
 
@@ -31,8 +33,8 @@ describe("full content store", () => {
       rememberSearchEntry(ref, String(i));
     }
 
-    expect(getStoredFullContent(refs[0])).toBeUndefined();
-    expect(getStoredFullContent(refs.at(-1)!)).toBeDefined();
+    expect(searchContentStore.getStoredSearchContent(refs[0])).toBeUndefined();
+    expect(searchContentStore.getStoredSearchContent(refs.at(-1)!)).toBeDefined();
   });
 
   it("expires old entries after a TTL", () => {
@@ -44,7 +46,7 @@ describe("full content store", () => {
 
     vi.advanceTimersByTime(24 * 60 * 60 * 1000);
 
-    expect(getStoredFullContent(ref)).toBeUndefined();
+    expect(searchContentStore.getStoredSearchContent(ref)).toBeUndefined();
   });
 
   it("generates opaque refs instead of short sequential IDs", () => {

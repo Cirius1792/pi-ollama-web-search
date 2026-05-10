@@ -134,7 +134,7 @@ function getSearchOmissionNotice(fullContentRef?: string): string {
 
 function getFetchTruncationNotice(maxOutputChars: number, fullContentRef?: string): string {
   if (fullContentRef) {
-    return `[Output truncated to ${maxOutputChars} characters to protect pi context. Use ollama_web_read_full with fullContentRef: ${fullContentRef}.]`;
+    return `[Output truncated to ${maxOutputChars} characters to protect pi context. Use ollama_web_read_full with ref ${fullContentRef}.]`;
   }
 
   return `[Output truncated to ${maxOutputChars} characters to protect pi context. See details for retrieval metadata.]`;

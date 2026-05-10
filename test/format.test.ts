@@ -180,7 +180,7 @@ describe("formatFetchResult", () => {
 
     expect(text.length).toBeLessThanOrEqual(180);
     expect(text).toContain("[Output truncated to 180 characters");
-    expect(text).toContain("Use ollama_web_read_full with fullContentRef: fetch:test-ref");
+    expect(text).toContain("Use ollama_web_read_full with ref fetch:test-ref");
   });
 
   it("preserves links when content is truncated", () => {
