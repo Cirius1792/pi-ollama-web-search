@@ -118,6 +118,32 @@ function getFetchTruncationNotice(maxOutputChars: number): string {
   return `[Output truncated to ${maxOutputChars} characters to protect pi context. See details for retrieval metadata.]`;
 }
 
+function buildSearchTrailingNotices(maxOutputChars: number, omittedResultCount: number): string {
+  const truncationNotice = getSearchTruncationNotice(maxOutputChars);
+  const omissionNotice = getSearchOmissionNotice();
+
+  const withBoth = `\n\n${truncationNotice}${omittedResultCount > 0 ? `\n\n${omissionNotice}` : ""}`;
+  if (withBoth.length <= maxOutputChars) {
+    return withBoth;
+  }
+
+  if (omittedResultCount > 0) {
+    const omissionOnly = `\n\n${omissionNotice}`;
+    if (omissionOnly.length <= maxOutputChars) {
+      return omissionOnly;
+    }
+
+    return applySafetyCap(omissionNotice, maxOutputChars);
+  }
+
+  const truncationOnly = `\n\n${truncationNotice}`;
+  if (truncationOnly.length <= maxOutputChars) {
+    return truncationOnly;
+  }
+
+  return applySafetyCap(truncationNotice, maxOutputChars);
+}
+
 export function formatSearchResultsWithMetadata(response: NormalizedSearchResponse, options: FormatOptions): FormattedSearchResult {
   if (response.results.length === 0) {
     return {
@@ -153,11 +179,6 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     };
   }
 
-  const truncationNotice = getSearchTruncationNotice(options.maxOutputChars);
-  const omissionNotice = getSearchOmissionNotice();
-  const buildTrailingNotices = (omittedCount: number): string =>
-    `\n\n${truncationNotice}${omittedCount > 0 ? `\n\n${omissionNotice}` : ""}`;
-
   const metadata: SearchResultTruncationMetadata[] = response.results.map((result) => ({
     targets: {
       title: buildTargetVisibilityMetadata(result.title.length, 0),
@@ -174,7 +195,7 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     const result = response.results[index];
     const chunk = chunks[index];
     const omittedIfStopHere = Math.max(0, response.results.length - (index + 1));
-    const trailingNotices = buildTrailingNotices(omittedIfStopHere);
+    const trailingNotices = buildSearchTrailingNotices(options.maxOutputChars, omittedIfStopHere);
 
     const fullChunkFits =
       header.length + visibleChunkText.length + chunk.chunk.length + trailingNotices.length <= options.maxOutputChars;
@@ -207,8 +228,11 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     break;
   }
 
-  const trailingNotices = buildTrailingNotices(omittedResultCount);
-  const text = applySafetyCap(header + visibleChunkText + partialChunk + trailingNotices, options.maxOutputChars);
+  const trailingNotices = buildSearchTrailingNotices(options.maxOutputChars, omittedResultCount);
+  const leadingText = header + visibleChunkText + partialChunk;
+  const availableForLeadingText = Math.max(0, options.maxOutputChars - trailingNotices.length);
+  const leadingVisibleText = leadingText.slice(0, availableForLeadingText);
+  const text = leadingVisibleText + trailingNotices;
 
   return {
     text,

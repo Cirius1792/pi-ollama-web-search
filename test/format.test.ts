@@ -88,6 +88,30 @@ describe("formatSearchResults", () => {
     expect(third.targets.title.visibleChars).toBe(0);
     expect(third.targets.url.visibleChars).toBe(0);
   });
+
+  it("preserves omitted-results messaging when max output is very small", () => {
+    const result = formatSearchResultsWithMetadata(
+      {
+        results: [
+          {
+            title: "First",
+            url: "https://example.com/first",
+            content: "a".repeat(40),
+          },
+          {
+            title: "Second",
+            url: "https://example.com/second",
+            content: "b".repeat(40),
+          },
+        ],
+      },
+      { maxOutputChars: 180 },
+    );
+
+    expect(result.truncation.omittedResultCount).toBeGreaterThan(0);
+    expect(result.text.length).toBeLessThanOrEqual(180);
+    expect(result.text).toContain("Additional search results were omitted from visible output");
+  });
 });
 
 describe("formatFetchResult", () => {
