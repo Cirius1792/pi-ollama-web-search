@@ -300,6 +300,37 @@ describe("extension", () => {
     );
   });
 
+  it("clears stored fetch retrieval refs on session_start", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          title: "Example title",
+          content: "Long content body",
+          links: ["https://example.com/a", "https://example.com/b"],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    await fake.handlers.session_start({}, { hasUI: false, ui: { notify: vi.fn() } });
+
+    await expect(
+      readFullTool?.execute("call-2", { fullContentRef, section: "content" }, new AbortController().signal),
+    ).rejects.toThrow(`No stored full content found for ref: ${fullContentRef}`);
+  });
+
   it("does not register the debug command by default", () => {
     const fake = createFakePi();
     extension(fake.pi as any);

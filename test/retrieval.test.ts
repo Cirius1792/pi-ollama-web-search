@@ -116,6 +116,30 @@ describe("readFullFetchContent abort handling", () => {
 });
 
 describe("registerFetchRetrieval store retention", () => {
+  it("issues unique refs for identical payloads", async () => {
+    const payload = {
+      title: "same title",
+      content: "same content",
+      links: ["https://example.com/same"],
+    };
+
+    const first = registerFetchRetrieval(payload);
+    const second = registerFetchRetrieval(payload);
+
+    expect(first.fullContentRef).toMatch(/^fetch:[a-f0-9]{24}$/);
+    expect(second.fullContentRef).toMatch(/^fetch:[a-f0-9]{24}$/);
+    expect(first.fullContentRef).not.toBe(second.fullContentRef);
+
+    await expect(readFullFetchContent({ fullContentRef: first.fullContentRef, section: "content" })).resolves.toMatchObject({
+      mode: "inline",
+      text: "same content",
+    });
+    await expect(readFullFetchContent({ fullContentRef: second.fullContentRef, section: "content" })).resolves.toMatchObject({
+      mode: "inline",
+      text: "same content",
+    });
+  });
+
   it("evicts older refs after the bounded store limit is exceeded", async () => {
     const oldest = registerFetchRetrieval({
       title: "oldest",
