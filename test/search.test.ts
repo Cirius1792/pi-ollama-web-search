@@ -106,6 +106,7 @@ describe("runOllamaWebSearch", () => {
       fetchImpl,
     });
 
+    expect(result.formatted.length).toBeLessThanOrEqual(360);
     expect(result.formatted).toContain("[1] First");
     expect(result.formatted).toContain("URL: https://example.com/first");
     expect(result.formatted).not.toContain("[2] Second");

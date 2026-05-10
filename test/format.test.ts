@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFetchResult, formatSearchResults } from "../src/format.js";
+import { formatFetchResult, formatSearchResults, formatSearchResultsWithMetadata } from "../src/format.js";
 
 describe("formatSearchResults", () => {
   it("formats search results as readable text", () => {
@@ -48,6 +48,45 @@ describe("formatSearchResults", () => {
 
     expect(text.length).toBeLessThanOrEqual(180);
     expect(text).toContain("[Output truncated to 180 characters");
+  });
+
+  it("avoids partial title/url metadata when truncating search output", () => {
+    const result = formatSearchResultsWithMetadata(
+      {
+        results: [
+          {
+            title: "First",
+            url: "https://example.com/first",
+            content: "a".repeat(120),
+          },
+          {
+            title: "Second",
+            url: "https://example.com/second",
+            content: "b".repeat(120),
+          },
+          {
+            title: "Third",
+            url: "https://example.com/third",
+            content: "c".repeat(120),
+          },
+        ],
+      },
+      { maxOutputChars: 370 },
+    );
+
+    expect(result.text.length).toBeLessThanOrEqual(370);
+    expect(result.text).toContain("[Output truncated to 370 characters");
+    expect(result.text).toContain("Additional search results were omitted from visible output");
+
+    expect(result.text).not.toContain("[2] S");
+    expect(result.text).not.toContain("[3] T");
+
+    const second = result.truncation.results[1];
+    const third = result.truncation.results[2];
+    expect(second.targets.title.visibleChars).toBe(0);
+    expect(second.targets.url.visibleChars).toBe(0);
+    expect(third.targets.title.visibleChars).toBe(0);
+    expect(third.targets.url.visibleChars).toBe(0);
   });
 });
 

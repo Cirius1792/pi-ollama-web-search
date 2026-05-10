@@ -153,51 +153,62 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     };
   }
 
-  let used = header.length;
-  let truncationIndex = 0;
-
-  for (let index = 0; index < chunks.length; index += 1) {
-    if (used + chunks[index].chunk.length > options.maxOutputChars) {
-      truncationIndex = index;
-      break;
-    }
-    used += chunks[index].chunk.length;
-  }
-
-  const omittedResultCount = Math.max(0, response.results.length - (truncationIndex + 1));
   const truncationNotice = getSearchTruncationNotice(options.maxOutputChars);
-  const omissionNotice = omittedResultCount > 0 ? getSearchOmissionNotice() : "";
-  const trailingNotices = `\n\n${truncationNotice}${omittedResultCount > 0 ? `\n\n${omissionNotice}` : ""}`;
+  const omissionNotice = getSearchOmissionNotice();
+  const buildTrailingNotices = (omittedCount: number): string =>
+    `\n\n${truncationNotice}${omittedCount > 0 ? `\n\n${omissionNotice}` : ""}`;
 
-  const visibleBeforeTruncation = header + chunks.slice(0, truncationIndex).map((chunk) => chunk.chunk).join("");
-  const remainingForTruncatedChunk = Math.max(0, options.maxOutputChars - visibleBeforeTruncation.length - trailingNotices.length);
-  const partialChunk = chunks[truncationIndex].chunk.slice(0, remainingForTruncatedChunk);
+  const metadata: SearchResultTruncationMetadata[] = response.results.map((result) => ({
+    targets: {
+      title: buildTargetVisibilityMetadata(result.title.length, 0),
+      url: buildTargetVisibilityMetadata(result.url.length, 0),
+      content: buildTargetVisibilityMetadata(result.content.length, 0),
+    },
+  }));
 
-  const text = visibleBeforeTruncation + partialChunk + trailingNotices;
+  let visibleChunkText = "";
+  let partialChunk = "";
+  let omittedResultCount = response.results.length;
 
-  const metadata: SearchResultTruncationMetadata[] = response.results.map((result, index) => {
-    if (index < truncationIndex) {
-      return {
+  for (let index = 0; index < response.results.length; index += 1) {
+    const result = response.results[index];
+    const chunk = chunks[index];
+    const omittedIfStopHere = Math.max(0, response.results.length - (index + 1));
+    const trailingNotices = buildTrailingNotices(omittedIfStopHere);
+
+    const fullChunkFits =
+      header.length + visibleChunkText.length + chunk.chunk.length + trailingNotices.length <= options.maxOutputChars;
+
+    if (fullChunkFits) {
+      visibleChunkText += chunk.chunk;
+      metadata[index] = {
         targets: {
           title: buildTargetVisibilityMetadata(result.title.length, result.title.length),
           url: buildTargetVisibilityMetadata(result.url.length, result.url.length),
           content: buildTargetVisibilityMetadata(result.content.length, result.content.length),
         },
       };
+      continue;
     }
 
-    if (index === truncationIndex) {
-      return buildSearchResultVisibility(index, result.title, result.url, result.content, partialChunk.length);
+    const availableForChunk = Math.max(0, options.maxOutputChars - header.length - visibleChunkText.length - trailingNotices.length);
+    const prefixLength = chunk.separator.length + chunk.prefix.length;
+
+    if (availableForChunk >= prefixLength) {
+      const visibleContentChars = Math.min(result.content.length, availableForChunk - prefixLength);
+      partialChunk = chunk.separator + chunk.prefix + result.content.slice(0, visibleContentChars);
+      metadata[index] = buildSearchResultVisibility(index, result.title, result.url, result.content, partialChunk.length);
+      omittedResultCount = omittedIfStopHere;
+    } else {
+      partialChunk = "";
+      omittedResultCount = response.results.length - index;
     }
 
-    return {
-      targets: {
-        title: buildTargetVisibilityMetadata(result.title.length, 0),
-        url: buildTargetVisibilityMetadata(result.url.length, 0),
-        content: buildTargetVisibilityMetadata(result.content.length, 0),
-      },
-    };
-  });
+    break;
+  }
+
+  const trailingNotices = buildTrailingNotices(omittedResultCount);
+  const text = applySafetyCap(header + visibleChunkText + partialChunk + trailingNotices, options.maxOutputChars);
 
   return {
     text,
