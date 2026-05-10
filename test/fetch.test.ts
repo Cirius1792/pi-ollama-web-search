@@ -168,14 +168,14 @@ describe("runOllamaWebFetch", () => {
       },
       content: {
         totalChars: 400,
-        visibleChars: 0,
-        remainingChars: 400,
+        visibleChars: 17,
+        remainingChars: 383,
         recommendedRetrievalMode: "inline",
       },
       links: {
         totalChars: "[1] https://example.com/1\n[2] https://example.com/2".length,
-        visibleChars: 0,
-        remainingChars: "[1] https://example.com/1\n[2] https://example.com/2".length,
+        visibleChars: "[1] https://example.com/1\n[2] https://example.com/2".length,
+        remainingChars: 0,
         recommendedRetrievalMode: "inline",
       },
     });

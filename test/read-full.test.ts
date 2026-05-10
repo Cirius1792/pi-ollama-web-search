@@ -21,7 +21,21 @@ describe("runOllamaWebReadFull", () => {
     await expect(
       runOllamaWebReadFull(
         { ref, section: "summary" as any, resultIndex: 1 },
-        { readFullFetchContent: vi.fn(async () => ({ mode: "inline", text: "", details: {} as any })) },
+        {
+          readFullFetchContent: vi.fn(async () => ({
+            mode: "inline" as const,
+            text: "",
+            details: {
+              mode: "inline" as const,
+              target: "fetch" as const,
+              section: "content" as const,
+              fullContentRef: "fetch:test",
+              offset: 0,
+              totalChars: 0,
+              returnedChars: 0,
+            },
+          })),
+        },
       ),
     ).rejects.toThrow("section must be one of: title, url, content.");
   });

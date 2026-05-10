@@ -27,6 +27,9 @@ export interface RunOllamaWebReadFullInput {
   signal?: AbortSignal;
 }
 
+type FetchInlineDetails = Extract<ReadFullFetchResult, { mode: "inline" }>["details"];
+type FetchFileDetails = Extract<ReadFullFetchResult, { mode: "file" }>["details"];
+
 export interface RunOllamaWebReadFullInlineResult {
   mode: "inline";
   text: string;
@@ -38,12 +41,12 @@ export interface RunOllamaWebReadFullInlineResult {
         resultIndex: number;
         servedFrom: "cache";
       }
-    | ReadFullFetchResult["details"];
+    | FetchInlineDetails;
 }
 
 export interface RunOllamaWebReadFullFileResult {
   mode: "file";
-  details: ReadFullFetchResult["details"];
+  details: FetchFileDetails;
 }
 
 export type RunOllamaWebReadFullResult = RunOllamaWebReadFullInlineResult | RunOllamaWebReadFullFileResult;
