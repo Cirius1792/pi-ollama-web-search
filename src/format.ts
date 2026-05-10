@@ -343,7 +343,11 @@ export function formatFetchResultWithMetadata(response: NormalizedFetchResponse,
 
   if (overflow > 0) {
     return {
-      text: applySafetyCap(truncatedText, options.maxOutputChars),
+      text: applySafetyCap(
+        truncatedText,
+        options.maxOutputChars,
+        `\n\n${getFetchTruncationNotice(options.maxOutputChars, options.fullContentRef)}`,
+      ),
       truncation: {
         truncated: true,
         maxOutputChars: options.maxOutputChars,

@@ -110,7 +110,12 @@ describe("extension", () => {
     expect(typeof fullContentRef).toBe("string");
     expect(fetchResult?.details?.retrieval?.target).toBe("fetch");
     expect(fetchResult?.details?.retrieval?.sections).toEqual(["title", "content", "links"]);
+    expect(fetchResult?.details?.retrieval?.targets?.title?.section).toBe("title");
+    expect(fetchResult?.details?.retrieval?.targets?.content?.section).toBe("content");
+    expect(fetchResult?.details?.retrieval?.targets?.links?.section).toBe("links");
     expect(fetchResult?.details?.retrieval?.targets?.title?.fullContentRef).toBe(fullContentRef);
+    expect(fetchResult?.details?.retrieval?.targets?.content?.fullContentRef).toBe(fullContentRef);
+    expect(fetchResult?.details?.retrieval?.targets?.links?.fullContentRef).toBe(fullContentRef);
 
     const inlineContentResult = await readFullTool?.execute("call-2", { ref: fullContentRef, section: "content" }, new AbortController().signal);
 

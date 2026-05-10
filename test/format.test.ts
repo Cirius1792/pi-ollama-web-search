@@ -198,6 +198,21 @@ describe("formatFetchResult", () => {
     expect(text).toContain("[2] https://example.com/2");
   });
 
+  it("includes read-full guidance when fallback truncation is triggered by non-content fields", () => {
+    const text = formatFetchResult(
+      {
+        title: "Very long title ".repeat(30),
+        content: "",
+        links: ["https://example.com/1"],
+      },
+      { maxOutputChars: 180, fullContentRef: "fetch:fallback-truncation" },
+    );
+
+    expect(text).toContain("[Output truncated to 180 characters");
+    expect(text).toContain("ollama_web_read_full");
+    expect(text).toContain("fetch:fallback-truncation");
+  });
+
   it("does not mention read-full retrieval when output is not truncated", () => {
     const text = formatFetchResult(
       {
