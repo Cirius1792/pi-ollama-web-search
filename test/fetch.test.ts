@@ -102,9 +102,25 @@ describe("runOllamaWebFetch", () => {
     expect(result.formatted).toContain("[Output truncated to 260 characters");
 
     expect((result.normalized as any).truncated).toBe(true);
-    expect((result.normalized as any).targets.title.visibleChars).toBe("Fetch Result".length);
-    expect((result.normalized as any).targets.links.visibleChars).toBeGreaterThan(0);
-    expect((result.normalized as any).targets.content.remainingChars).toBeGreaterThan(0);
-    expect((result.normalized as any).targets.content.recommendedRetrievalMode).toBe("inline");
+    expect((result.normalized as any).targets).toEqual({
+      title: {
+        totalChars: "Fetch Result".length,
+        visibleChars: "Fetch Result".length,
+        remainingChars: 0,
+        recommendedRetrievalMode: "inline",
+      },
+      content: {
+        totalChars: 400,
+        visibleChars: 59,
+        remainingChars: 341,
+        recommendedRetrievalMode: "inline",
+      },
+      links: {
+        totalChars: "[1] https://example.com/1\n[2] https://example.com/2".length,
+        visibleChars: "[1] https://example.com/1\n[2] https://example.com/2".length,
+        remainingChars: 0,
+        recommendedRetrievalMode: "inline",
+      },
+    });
   });
 });

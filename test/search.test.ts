@@ -119,6 +119,17 @@ describe("runOllamaWebSearch", () => {
     expect(contentRemaining.some((remaining: number) => remaining > 0)).toBe(true);
     expect((result.normalized as any).results[2].targets.title.visibleChars).toBe(0);
     expect((result.normalized as any).results[2].targets.url.visibleChars).toBe(0);
+
+    const nestedTargets = (result.normalized as any).results.map((entry: any) => entry.targets);
+    expect(nestedTargets[0].title.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[0].url.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[0].content.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[1].title.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[1].url.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[1].content.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[2].title.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[2].url.recommendedRetrievalMode).toBe("inline");
+    expect(nestedTargets[2].content.recommendedRetrievalMode).toBe("inline");
   });
 });
 
