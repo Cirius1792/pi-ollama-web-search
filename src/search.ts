@@ -1,7 +1,7 @@
 import { getMissingApiKeyMessage, type OllamaSearchConfig } from "./config.js";
 import { searchOllamaWeb } from "./client.js";
-import { formatSearchResults } from "./format.js";
-import { normalizeWebSearchResponse, type NormalizedSearchResponse } from "./normalize.js";
+import { formatSearchResultsWithMetadata, type SearchTruncationMetadata } from "./format.js";
+import { normalizeWebSearchResponse } from "./normalize.js";
 
 export interface RunOllamaWebSearchOptions {
   config: OllamaSearchConfig;
@@ -9,9 +9,21 @@ export interface RunOllamaWebSearchOptions {
   fetchImpl?: typeof fetch;
 }
 
+export interface SearchResultDetails {
+  truncated: boolean;
+  maxOutputChars: number;
+  omittedResultCount: number;
+  results: Array<{
+    title: string;
+    url: string;
+    content: string;
+    targets: SearchTruncationMetadata["results"][number]["targets"];
+  }>;
+}
+
 export interface RunOllamaWebSearchResult {
   formatted: string;
-  normalized: NormalizedSearchResponse;
+  normalized: SearchResultDetails;
 }
 
 export async function runOllamaWebSearch(query: string, options: RunOllamaWebSearchOptions): Promise<RunOllamaWebSearchResult> {
@@ -34,9 +46,20 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
   });
 
   const normalized = normalizeWebSearchResponse(raw);
-  const formatted = formatSearchResults(normalized, { maxOutputChars: options.config.maxOutputChars });
+  const formattedResult = formatSearchResultsWithMetadata(normalized, { maxOutputChars: options.config.maxOutputChars });
 
-  return { formatted, normalized };
+  return {
+    formatted: formattedResult.text,
+    normalized: {
+      truncated: formattedResult.truncation.truncated,
+      maxOutputChars: formattedResult.truncation.maxOutputChars,
+      omittedResultCount: formattedResult.truncation.omittedResultCount,
+      results: normalized.results.map((result, index) => ({
+        ...result,
+        targets: formattedResult.truncation.results[index].targets,
+      })),
+    },
+  };
 }
 
 export function formatOllamaWebError(error: unknown): string {
