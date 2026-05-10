@@ -1,17 +1,34 @@
 import { getMissingApiKeyMessage, type OllamaSearchConfig } from "./config.js";
 import { searchOllamaWeb } from "./client.js";
-import { formatSearchResults } from "./format.js";
+import { formatSearchResultsWithMetadata, type SearchTruncationMetadata } from "./format.js";
 import { normalizeWebSearchResponse, type NormalizedSearchResponse } from "./normalize.js";
+import { buildSearchRetrievalMetadata, createFullContentRef, type SearchRetrievalMetadata } from "./store.js";
 
 export interface RunOllamaWebSearchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  rememberSearchContent?: (input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }) => void;
+}
+
+export interface SearchResultDetails {
+  truncated: boolean;
+  maxOutputChars: number;
+  omittedResultCount: number;
+  results: Array<{
+    title: string;
+    url: string;
+    content: string;
+    targets: SearchTruncationMetadata["results"][number]["targets"];
+  }>;
 }
 
 export interface RunOllamaWebSearchResult {
   formatted: string;
-  normalized: NormalizedSearchResponse;
+  normalized: SearchResultDetails;
+  fullContentRef?: string;
+  truncated: boolean;
+  retrieval?: SearchRetrievalMetadata;
 }
 
 export async function runOllamaWebSearch(query: string, options: RunOllamaWebSearchOptions): Promise<RunOllamaWebSearchResult> {
@@ -34,9 +51,53 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
   });
 
   const normalized = normalizeWebSearchResponse(raw);
-  const formatted = formatSearchResults(normalized, { maxOutputChars: options.config.maxOutputChars });
 
-  return { formatted, normalized };
+  if (normalized.results.length === 0) {
+    return {
+      formatted: "No results found.",
+      normalized: {
+        truncated: false,
+        maxOutputChars: options.config.maxOutputChars,
+        omittedResultCount: 0,
+        results: [],
+      },
+      truncated: false,
+    };
+  }
+
+  const fullContentRef = createFullContentRef("search");
+  options.rememberSearchContent?.({
+    ref: fullContentRef,
+    query: trimmedQuery,
+    maxResults: options.config.maxResults,
+    payload: normalized,
+  });
+
+  const retrieval = buildSearchRetrievalMetadata(normalized);
+  let truncated = false;
+  const formattedResult = formatSearchResultsWithMetadata(normalized, {
+    maxOutputChars: options.config.maxOutputChars,
+    fullContentRef,
+    onTruncate: () => {
+      truncated = true;
+    },
+  });
+
+  return {
+    formatted: formattedResult.text,
+    normalized: {
+      truncated: formattedResult.truncation.truncated,
+      maxOutputChars: formattedResult.truncation.maxOutputChars,
+      omittedResultCount: formattedResult.truncation.omittedResultCount,
+      results: normalized.results.map((result, index) => ({
+        ...result,
+        targets: formattedResult.truncation.results[index].targets,
+      })),
+    },
+    fullContentRef,
+    truncated,
+    retrieval,
+  };
 }
 
 export function formatOllamaWebError(error: unknown): string {

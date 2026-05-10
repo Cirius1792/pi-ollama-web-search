@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFetchResult, formatSearchResults } from "../src/format.js";
+import { formatFetchResult, formatSearchResults, formatSearchResultsWithMetadata } from "../src/format.js";
 
 describe("formatSearchResults", () => {
   it("formats search results as readable text", () => {
@@ -49,6 +49,90 @@ describe("formatSearchResults", () => {
     expect(text.length).toBeLessThanOrEqual(180);
     expect(text).toContain("[Output truncated to 180 characters");
   });
+
+  it("never exceeds the safety cap when maxOutputChars is tiny", () => {
+    const maxOutputChars = 20;
+    const text = formatSearchResults(
+      {
+        results: [
+          {
+            title: "Large Result",
+            url: "https://example.com/large",
+            content: "x".repeat(500),
+          },
+        ],
+      },
+      {
+        maxOutputChars,
+        fullContentRef: "ref-123",
+      },
+    );
+
+    expect(text.length).toBeLessThanOrEqual(maxOutputChars);
+  });
+
+  it("avoids partial title/url metadata when truncating search output", () => {
+    const result = formatSearchResultsWithMetadata(
+      {
+        results: [
+          {
+            title: "First",
+            url: "https://example.com/first",
+            content: "a".repeat(120),
+          },
+          {
+            title: "Second",
+            url: "https://example.com/second",
+            content: "b".repeat(120),
+          },
+          {
+            title: "Third",
+            url: "https://example.com/third",
+            content: "c".repeat(120),
+          },
+        ],
+      },
+      { maxOutputChars: 370 },
+    );
+
+    expect(result.text.length).toBeLessThanOrEqual(370);
+    expect(result.text).toContain("[Output truncated to 370 characters");
+    expect(result.text).toContain("Additional search results were omitted from visible output");
+
+    expect(result.text).not.toContain("[2] S");
+    expect(result.text).not.toContain("[3] T");
+
+    const second = result.truncation.results[1];
+    const third = result.truncation.results[2];
+    expect(second.targets.title.visibleChars).toBe(0);
+    expect(second.targets.url.visibleChars).toBe(0);
+    expect(third.targets.title.visibleChars).toBe(0);
+    expect(third.targets.url.visibleChars).toBe(0);
+  });
+
+  it("preserves omitted-results messaging when max output is very small", () => {
+    const result = formatSearchResultsWithMetadata(
+      {
+        results: [
+          {
+            title: "First",
+            url: "https://example.com/first",
+            content: "a".repeat(40),
+          },
+          {
+            title: "Second",
+            url: "https://example.com/second",
+            content: "b".repeat(40),
+          },
+        ],
+      },
+      { maxOutputChars: 180 },
+    );
+
+    expect(result.truncation.omittedResultCount).toBeGreaterThan(0);
+    expect(result.text.length).toBeLessThanOrEqual(180);
+    expect(result.text).toContain("Additional search results were omitted from visible output");
+  });
 });
 
 describe("formatFetchResult", () => {
@@ -91,11 +175,12 @@ describe("formatFetchResult", () => {
         content: "x".repeat(500),
         links: ["https://example.com/1", "https://example.com/2"],
       },
-      { maxOutputChars: 180 },
+      { maxOutputChars: 180, fullContentRef: "fetch:test-ref" },
     );
 
     expect(text.length).toBeLessThanOrEqual(180);
     expect(text).toContain("[Output truncated to 180 characters");
+    expect(text).toContain("Use ollama_web_read_full with ref fetch:test-ref");
   });
 
   it("preserves links when content is truncated", () => {
@@ -105,11 +190,54 @@ describe("formatFetchResult", () => {
         content: "x".repeat(1000),
         links: ["https://example.com/1", "https://example.com/2"],
       },
-      { maxOutputChars: 500 },
+      { maxOutputChars: 500, fullContentRef: "fetch:ref-2" },
     );
 
     expect(text).toContain("Links:");
     expect(text).toContain("[1] https://example.com/1");
     expect(text).toContain("[2] https://example.com/2");
+  });
+
+  it("includes read-full guidance when fallback truncation is triggered by non-content fields", () => {
+    const text = formatFetchResult(
+      {
+        title: "Very long title ".repeat(30),
+        content: "",
+        links: ["https://example.com/1"],
+      },
+      { maxOutputChars: 180, fullContentRef: "fetch:fallback-truncation" },
+    );
+
+    expect(text).toContain("[Output truncated to 180 characters");
+    expect(text).toContain("ollama_web_read_full");
+    expect(text).toContain("fetch:fallback-truncation");
+  });
+
+  it("keeps read-full guidance when truncation and a long title force a final safety slice", () => {
+    const text = formatFetchResult(
+      {
+        title: "Very long title ".repeat(30),
+        content: "Non-empty content that still needs retrieval guidance.",
+        links: ["https://example.com/1"],
+      },
+      { maxOutputChars: 180, fullContentRef: "fetch:long-title-regression" },
+    );
+
+    expect(text).toContain("ollama_web_read_full");
+    expect(text).toContain("fetch:long-title-regression");
+  });
+
+  it("does not mention read-full retrieval when output is not truncated", () => {
+    const text = formatFetchResult(
+      {
+        title: "Short",
+        content: "Small content",
+        links: ["https://example.com/1"],
+      },
+      { maxOutputChars: 10_000, fullContentRef: "fetch:no-truncation" },
+    );
+
+    expect(text).not.toContain("ollama_web_read_full");
+    expect(text).not.toContain("fetch:no-truncation");
   });
 });
