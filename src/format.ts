@@ -117,7 +117,7 @@ function buildSearchResultVisibility(index: number, title: string, url: string, 
 
 function getSearchTruncationNotice(maxOutputChars: number, fullContentRef?: string): string {
   if (fullContentRef) {
-    return `[Output truncated to ${maxOutputChars} characters to protect pi context. Full content is available via ollama_web_read_full with ref ${fullContentRef}.]`;
+    return `[Output truncated to ${maxOutputChars} characters to protect pi context. Use ollama_web_read_full with ref ${fullContentRef}.]`;
   }
 
   return `[Output truncated to ${maxOutputChars} characters to protect pi context. See details for retrieval metadata.]`;
@@ -125,7 +125,7 @@ function getSearchTruncationNotice(maxOutputChars: number, fullContentRef?: stri
 
 function getSearchOmissionNotice(fullContentRef?: string): string {
   if (fullContentRef) {
-    return `Additional search results were omitted from visible output. Use ollama_web_read_full with ref ${fullContentRef} and a resultIndex to retrieve them.`;
+    return `Additional search results were omitted from visible output. Use resultIndex with ref ${fullContentRef} to retrieve them.`;
   }
 
   return "Additional search results were omitted from visible output. See details for omitted result targets.";

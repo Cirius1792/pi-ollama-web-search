@@ -207,7 +207,11 @@ describe("extension", () => {
     const searchResult = await searchTool!.execute("tool-empty", { query: "no hits" }, undefined);
 
     expect(searchResult.content).toEqual([{ type: "text", text: "No results found." }]);
-    expect(searchResult.details).toEqual({ results: [], truncated: false });
+    expect(searchResult.details).toMatchObject({
+      results: [],
+      truncated: false,
+      omittedResultCount: 0,
+    });
     expect(searchResult.details.fullContentRef).toBeUndefined();
     expect(searchResult.details.retrieval).toBeUndefined();
   });
