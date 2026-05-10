@@ -1,6 +1,6 @@
 import { getStoredFullContent } from "./store.js";
 
-export type ReadFullSection = "title" | "url" | "content" | "links";
+export type ReadFullSection = "title" | "url" | "content";
 
 export interface RunOllamaWebReadFullInput {
   ref: string;
@@ -14,8 +14,8 @@ export interface RunOllamaWebReadFullResult {
   text: string;
   details: {
     ref: string;
-    kind: "search" | "fetch";
-    section: "title" | "url" | "content" | "links";
+    kind: "search";
+    section: "title" | "url" | "content";
     resultIndex?: number;
     servedFrom: "cache";
   };
@@ -45,10 +45,6 @@ export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllam
       throw new Error("resultIndex is required for search refs.");
     }
 
-    if (section === "links") {
-      throw new Error('Section "links" is not valid for search refs.');
-    }
-
     if (!Number.isInteger(input.resultIndex) || input.resultIndex < 1 || input.resultIndex > stored.payload.results.length) {
       throw new Error(
         `Search result index ${String(input.resultIndex)} is out of range. Valid range is 1-${stored.payload.results.length}.`,
@@ -56,16 +52,7 @@ export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllam
     }
 
     const selected = stored.payload.results[input.resultIndex - 1];
-    const text =
-      section === "title"
-        ? selected.title
-        : section === "url"
-          ? selected.url
-          : section === "content"
-            ? selected.content
-            : (() => {
-                throw new Error(`Section "${section}" is not valid for search refs.`);
-              })();
+    const text = section === "title" ? selected.title : section === "url" ? selected.url : selected.content;
 
     return {
       text: sliceByOffsetAndMaxChars(text, offset, input.maxChars),

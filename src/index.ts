@@ -14,20 +14,18 @@ const FetchParams = Type.Object({
 });
 
 const ReadFullParams = Type.Object({
-  ref: Type.String({ description: "A full-content ref returned by ollama_web_search or ollama_web_fetch." }),
+  ref: Type.String({ description: "A full-content ref returned by ollama_web_search." }),
   section: Type.Optional(
     Type.Union([
       Type.Literal("title"),
       Type.Literal("url"),
       Type.Literal("content"),
-      Type.Literal("links"),
     ], { description: "Single section/field to read. Defaults to content." }),
   ),
-  resultIndex: Type.Optional(Type.Number({ description: "1-based search result index. Required for search refs." })),
+  resultIndex: Type.Optional(Type.Number({ description: "1-based search result index. Required." })),
   offset: Type.Optional(Type.Number({ description: "Start offset for inline retrieval. Must be 0 or greater." })),
   maxChars: Type.Optional(Type.Number({ description: "Maximum characters to return for inline retrieval." })),
 });
-
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
 
@@ -77,7 +75,6 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: result.formatted }],
         details: {
           ...result.normalized,
-          fullContentRef: result.fullContentRef,
         },
       };
     },
@@ -86,11 +83,11 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ollama_web_read_full",
     label: "Ollama Web Read Full",
-    description: "Read full content from previous web search/fetch results using a ref and one selected section.",
-    promptSnippet: "Recover full text from previous Ollama web search/fetch refs one field at a time.",
+    description: "Read full content from previous web search results using a ref and one selected section.",
+    promptSnippet: "Recover full text from previous Ollama web search refs one field at a time.",
     promptGuidelines: [
-      "Use ollama_web_read_full only with refs returned by previous ollama_web_search or ollama_web_fetch calls.",
-      "For search refs, pass resultIndex using the same 1-based numbering shown in search results.",
+      "Use ollama_web_read_full only with refs returned by previous ollama_web_search calls.",
+      "Pass resultIndex using the same 1-based numbering shown in search results.",
       "Retrieve exactly one field at a time using section: title, url, or content.",
     ],
     parameters: ReadFullParams,
@@ -138,7 +135,6 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
             display: true,
             details: {
               ...result.normalized,
-              fullContentRef: result.fullContentRef,
             },
           });
         } catch (error) {

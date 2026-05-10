@@ -3,8 +3,10 @@ import extension from "../src/index.js";
 
 interface RegisteredTool {
   name: string;
+  description?: string;
   promptSnippet?: string;
   promptGuidelines?: string[];
+  parameters?: any;
   execute: (...args: any[]) => Promise<any>;
 }
 
@@ -152,6 +154,26 @@ describe("extension", () => {
     });
   });
 
+  it("keeps read-full scope search-only in schema and guidance", () => {
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    expect(readFullTool).toBeDefined();
+    expect(readFullTool?.description).toContain("previous web search results");
+    expect(readFullTool?.description).not.toContain("fetch");
+    expect(readFullTool?.promptSnippet).toContain("search refs");
+    expect(readFullTool?.promptGuidelines?.join(" ")).not.toContain("ollama_web_fetch");
+    expect(readFullTool?.parameters?.properties?.ref?.description).toContain("ollama_web_search");
+    expect(readFullTool?.parameters?.properties?.ref?.description).not.toContain("ollama_web_fetch");
+
+    const sectionOptions = readFullTool?.parameters?.properties?.section?.anyOf ?? [];
+    const sectionLiterals = sectionOptions.map((option: { const?: string }) => option.const).filter(Boolean);
+    expect(sectionLiterals).toEqual(expect.arrayContaining(["title", "url", "content"]));
+    expect(sectionLiterals).not.toContain("links");
+  });
+
   it("validates search retrieval inputs with explicit errors", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
@@ -203,21 +225,15 @@ describe("extension", () => {
       "resultIndex is required for search refs.",
     );
 
-    await expect(readFullTool!.execute("tool-3", { ref, section: "links", resultIndex: 1 }, undefined)).rejects.toThrow(
-      'Section "links" is not valid for search refs.',
-    );
-
-    await expect(readFullTool!.execute("tool-4", { ref, section: "content", resultIndex: 6 }, undefined)).rejects.toThrow(
+    await expect(readFullTool!.execute("tool-3", { ref, section: "content", resultIndex: 6 }, undefined)).rejects.toThrow(
       "Search result index 6 is out of range. Valid range is 1-5.",
     );
 
-    await expect(readFullTool!.execute("tool-5", { ref, section: "content", resultIndex: 1, offset: -1 }, undefined)).rejects.toThrow(
+    await expect(readFullTool!.execute("tool-4", { ref, section: "content", resultIndex: 1, offset: -1 }, undefined)).rejects.toThrow(
       "Offset must be 0 or greater.",
     );
 
-    const fetchResult = await fetchTool!.execute("tool-6", { url: "https://example.com/fetch" }, undefined);
-    await expect(
-      readFullTool!.execute("tool-7", { ref: fetchResult.details.fullContentRef, section: "content", resultIndex: 1 }, undefined),
-    ).rejects.toThrow("resultIndex is only valid for search refs.");
+    const fetchResult = await fetchTool!.execute("tool-5", { url: "https://example.com/fetch" }, undefined);
+    expect(fetchResult.details.fullContentRef).toBeUndefined();
   });
 });
