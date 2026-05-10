@@ -2,6 +2,12 @@ import { getStoredFullContent } from "./store.js";
 
 export type ReadFullSection = "title" | "url" | "content";
 
+const READ_FULL_SECTIONS: readonly ReadFullSection[] = ["title", "url", "content"];
+
+function isReadFullSection(value: unknown): value is ReadFullSection {
+  return typeof value === "string" && (READ_FULL_SECTIONS as readonly string[]).includes(value);
+}
+
 export interface RunOllamaWebReadFullInput {
   ref: string;
   section?: ReadFullSection;
@@ -39,6 +45,10 @@ export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllam
   }
 
   const section = input.section ?? "content";
+  if (!isReadFullSection(section)) {
+    throw new Error("section must be one of: title, url, content.");
+  }
+
   const stored = getStoredFullContent(input.ref);
   if (!stored) {
     throw new Error(`No stored content found for ref ${input.ref}.`);

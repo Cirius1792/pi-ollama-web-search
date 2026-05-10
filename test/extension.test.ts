@@ -154,6 +154,33 @@ describe("extension", () => {
     });
   });
 
+  it("omits read-full metadata when search returns no results", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ results: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    expect(searchTool).toBeDefined();
+
+    const searchResult = await searchTool!.execute("tool-empty", { query: "no hits" }, undefined);
+
+    expect(searchResult.content).toEqual([{ type: "text", text: "No results found." }]);
+    expect(searchResult.details).toEqual({ results: [], truncated: false });
+    expect(searchResult.details.fullContentRef).toBeUndefined();
+    expect(searchResult.details.retrieval).toBeUndefined();
+  });
+
   it("keeps read-full scope search-only in schema and guidance", () => {
     const fake = createFakePi();
     extension(fake.pi as any);

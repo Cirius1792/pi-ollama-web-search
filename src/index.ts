@@ -48,9 +48,9 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: result.formatted }],
         details: {
           ...result.normalized,
-          fullContentRef: result.fullContentRef,
           truncated: result.truncated,
-          retrieval: result.retrieval,
+          ...(result.fullContentRef ? { fullContentRef: result.fullContentRef } : {}),
+          ...(result.retrieval ? { retrieval: result.retrieval } : {}),
         },
       };
     },
@@ -113,9 +113,9 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
             display: true,
             details: {
               ...result.normalized,
-              fullContentRef: result.fullContentRef,
               truncated: result.truncated,
-              retrieval: result.retrieval,
+              ...(result.fullContentRef ? { fullContentRef: result.fullContentRef } : {}),
+              ...(result.retrieval ? { retrieval: result.retrieval } : {}),
             },
           });
         } catch (error) {
