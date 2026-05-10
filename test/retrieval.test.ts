@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mkdirMock, writeFileMock } = vi.hoisted(() => ({
-  mkdirMock: vi.fn(async () => undefined),
-  writeFileMock: vi.fn(async () => undefined),
+  mkdirMock: vi.fn<(...args: unknown[]) => Promise<void>>(async (..._args: unknown[]) => {}),
+  writeFileMock: vi.fn<(...args: unknown[]) => Promise<void>>(async (..._args: unknown[]) => {}),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -10,7 +10,18 @@ vi.mock("node:fs/promises", () => ({
   writeFile: writeFileMock,
 }));
 
-import { readFullFetchContent, registerFetchRetrieval } from "../src/retrieval.js";
+import {
+  FETCH_RETRIEVAL_STORE_MAX_ENTRIES,
+  readFullFetchContent,
+  registerFetchRetrieval,
+} from "../src/retrieval.js";
+
+beforeEach(() => {
+  mkdirMock.mockReset();
+  writeFileMock.mockReset();
+  mkdirMock.mockImplementation(async (..._args: unknown[]) => {});
+  writeFileMock.mockImplementation(async (..._args: unknown[]) => {});
+});
 
 describe("readFullFetchContent abort handling", () => {
   it("throws AbortError before file work when signal is already aborted", async () => {
@@ -61,5 +72,70 @@ describe("readFullFetchContent abort handling", () => {
 
     expect(mkdirMock).toHaveBeenCalledTimes(1);
     expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it("propagates abort signal into writeFile so an in-progress write can cancel", async () => {
+    const record = registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    const controller = new AbortController();
+    writeFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const options = (args[2] as { encoding?: string; signal?: AbortSignal } | undefined) ?? undefined;
+
+      return new Promise<void>((resolve, reject) => {
+        if (!options?.signal) {
+          resolve();
+          return;
+        }
+
+        options.signal.addEventListener(
+          "abort",
+          () => {
+            reject(options.signal?.reason);
+          },
+          { once: true },
+        );
+
+        controller.abort();
+      });
+    });
+
+    await expect(
+      readFullFetchContent({
+        fullContentRef: record.fullContentRef,
+        section: "content",
+        mode: "file",
+        outputPath: "/tmp/example.txt",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("registerFetchRetrieval store retention", () => {
+  it("evicts older refs after the bounded store limit is exceeded", async () => {
+    const oldest = registerFetchRetrieval({
+      title: "oldest",
+      content: "payload-0",
+      links: ["https://example.com/0"],
+    });
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES * 2; i += 1) {
+      registerFetchRetrieval({
+        title: `title-${i}`,
+        content: `payload-${i}`,
+        links: [`https://example.com/${i}`],
+      });
+    }
+
+    await expect(
+      readFullFetchContent({
+        fullContentRef: oldest.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${oldest.fullContentRef}`);
   });
 });
