@@ -11,6 +11,7 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 import {
+  FETCH_RETRIEVAL_STORE_MAX_BYTES,
   FETCH_RETRIEVAL_STORE_MAX_ENTRIES,
   clearFetchRetrievalStore,
   readFullFetchContent,
@@ -181,6 +182,31 @@ describe("registerFetchRetrieval store retention", () => {
       title: "second",
       content: "b".repeat(900_000),
       links: ["https://example.com/second"],
+    });
+
+    await expect(readFullFetchContent({ fullContentRef: newest.fullContentRef, section: "content" })).resolves.toMatchObject({
+      mode: "inline",
+    });
+
+    await expect(
+      readFullFetchContent({
+        fullContentRef: oldest.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${oldest.fullContentRef}`);
+  });
+
+  it("keeps the newest ref readable even when its payload alone exceeds the byte budget", async () => {
+    const oldest = registerFetchRetrieval({
+      title: "oldest",
+      content: "payload-0",
+      links: ["https://example.com/0"],
+    });
+
+    const newest = registerFetchRetrieval({
+      title: "oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
     });
 
     await expect(readFullFetchContent({ fullContentRef: newest.fullContentRef, section: "content" })).resolves.toMatchObject({
