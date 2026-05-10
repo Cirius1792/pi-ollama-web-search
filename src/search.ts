@@ -2,6 +2,7 @@ import { getMissingApiKeyMessage, type OllamaSearchConfig } from "./config.js";
 import { searchOllamaWeb } from "./client.js";
 import { formatSearchResultsWithMetadata, type SearchTruncationMetadata } from "./format.js";
 import { normalizeWebSearchResponse } from "./normalize.js";
+import { buildSearchRetrievalMetadata, createFullContentRef, type SearchRetrievalMetadata, rememberSearchContent } from "./store.js";
 
 export interface RunOllamaWebSearchOptions {
   config: OllamaSearchConfig;
@@ -24,6 +25,9 @@ export interface SearchResultDetails {
 export interface RunOllamaWebSearchResult {
   formatted: string;
   normalized: SearchResultDetails;
+  fullContentRef?: string;
+  truncated: boolean;
+  retrieval?: SearchRetrievalMetadata;
 }
 
 export async function runOllamaWebSearch(query: string, options: RunOllamaWebSearchOptions): Promise<RunOllamaWebSearchResult> {
@@ -46,7 +50,37 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
   });
 
   const normalized = normalizeWebSearchResponse(raw);
-  const formattedResult = formatSearchResultsWithMetadata(normalized, { maxOutputChars: options.config.maxOutputChars });
+
+  if (normalized.results.length === 0) {
+    return {
+      formatted: "No results found.",
+      normalized: {
+        truncated: false,
+        maxOutputChars: options.config.maxOutputChars,
+        omittedResultCount: 0,
+        results: [],
+      },
+      truncated: false,
+    };
+  }
+
+  const fullContentRef = createFullContentRef("search");
+  rememberSearchContent({
+    ref: fullContentRef,
+    query: trimmedQuery,
+    maxResults: options.config.maxResults,
+    payload: normalized,
+  });
+
+  const retrieval = buildSearchRetrievalMetadata(normalized);
+  let truncated = false;
+  const formattedResult = formatSearchResultsWithMetadata(normalized, {
+    maxOutputChars: options.config.maxOutputChars,
+    fullContentRef,
+    onTruncate: () => {
+      truncated = true;
+    },
+  });
 
   return {
     formatted: formattedResult.text,
@@ -59,6 +93,9 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
         targets: formattedResult.truncation.results[index].targets,
       })),
     },
+    fullContentRef,
+    truncated,
+    retrieval,
   };
 }
 

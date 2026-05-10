@@ -4,6 +4,11 @@ export interface FormatOptions {
   maxOutputChars: number;
 }
 
+export interface SearchFormatOptions extends FormatOptions {
+  fullContentRef?: string;
+  onTruncate?: () => void;
+}
+
 export type RecommendedRetrievalMode = "inline" | "file";
 
 export interface TargetVisibilityMetadata {
@@ -50,11 +55,15 @@ export interface FormattedFetchResult {
 
 const RETRIEVAL_INLINE_THRESHOLD = 12_000;
 
-function applySafetyCap(text: string, maxOutputChars: number): string {
+function applySafetyCap(text: string, maxOutputChars: number, truncationNotice?: string): string {
   if (text.length <= maxOutputChars) return text;
 
-  const notice = `\n\n[Output truncated to ${maxOutputChars} characters to protect pi context.]`;
-  const available = Math.max(0, maxOutputChars - notice.length);
+  const notice = truncationNotice ?? `\n\n[Output truncated to ${maxOutputChars} characters to protect pi context.]`;
+  if (notice.length >= maxOutputChars) {
+    return notice.slice(0, maxOutputChars);
+  }
+
+  const available = maxOutputChars - notice.length;
   return text.slice(0, available).trimEnd() + notice;
 }
 
@@ -106,11 +115,19 @@ function buildSearchResultVisibility(index: number, title: string, url: string, 
   };
 }
 
-function getSearchTruncationNotice(maxOutputChars: number): string {
+function getSearchTruncationNotice(maxOutputChars: number, fullContentRef?: string): string {
+  if (fullContentRef) {
+    return `[Output truncated to ${maxOutputChars} characters to protect pi context. Full content is available via ollama_web_read_full with ref ${fullContentRef}.]`;
+  }
+
   return `[Output truncated to ${maxOutputChars} characters to protect pi context. See details for retrieval metadata.]`;
 }
 
-function getSearchOmissionNotice(): string {
+function getSearchOmissionNotice(fullContentRef?: string): string {
+  if (fullContentRef) {
+    return `Additional search results were omitted from visible output. Use ollama_web_read_full with ref ${fullContentRef} and a resultIndex to retrieve them.`;
+  }
+
   return "Additional search results were omitted from visible output. See details for omitted result targets.";
 }
 
@@ -118,9 +135,9 @@ function getFetchTruncationNotice(maxOutputChars: number): string {
   return `[Output truncated to ${maxOutputChars} characters to protect pi context. See details for retrieval metadata.]`;
 }
 
-function buildSearchTrailingNotices(maxOutputChars: number, omittedResultCount: number): string {
-  const truncationNotice = getSearchTruncationNotice(maxOutputChars);
-  const omissionNotice = getSearchOmissionNotice();
+function buildSearchTrailingNotices(maxOutputChars: number, omittedResultCount: number, fullContentRef?: string): string {
+  const truncationNotice = getSearchTruncationNotice(maxOutputChars, fullContentRef);
+  const omissionNotice = getSearchOmissionNotice(fullContentRef);
 
   const withBoth = `\n\n${truncationNotice}${omittedResultCount > 0 ? `\n\n${omissionNotice}` : ""}`;
   if (withBoth.length <= maxOutputChars) {
@@ -144,7 +161,7 @@ function buildSearchTrailingNotices(maxOutputChars: number, omittedResultCount: 
   return applySafetyCap(truncationNotice, maxOutputChars);
 }
 
-export function formatSearchResultsWithMetadata(response: NormalizedSearchResponse, options: FormatOptions): FormattedSearchResult {
+export function formatSearchResultsWithMetadata(response: NormalizedSearchResponse, options: SearchFormatOptions): FormattedSearchResult {
   if (response.results.length === 0) {
     return {
       text: "No results found.",
@@ -179,6 +196,8 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     };
   }
 
+  options.onTruncate?.();
+
   const metadata: SearchResultTruncationMetadata[] = response.results.map((result) => ({
     targets: {
       title: buildTargetVisibilityMetadata(result.title.length, 0),
@@ -195,7 +214,7 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     const result = response.results[index];
     const chunk = chunks[index];
     const omittedIfStopHere = Math.max(0, response.results.length - (index + 1));
-    const trailingNotices = buildSearchTrailingNotices(options.maxOutputChars, omittedIfStopHere);
+    const trailingNotices = buildSearchTrailingNotices(options.maxOutputChars, omittedIfStopHere, options.fullContentRef);
 
     const fullChunkFits =
       header.length + visibleChunkText.length + chunk.chunk.length + trailingNotices.length <= options.maxOutputChars;
@@ -228,7 +247,7 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     break;
   }
 
-  const trailingNotices = buildSearchTrailingNotices(options.maxOutputChars, omittedResultCount);
+  const trailingNotices = buildSearchTrailingNotices(options.maxOutputChars, omittedResultCount, options.fullContentRef);
   const leadingText = header + visibleChunkText + partialChunk;
   const availableForLeadingText = Math.max(0, options.maxOutputChars - trailingNotices.length);
   const leadingVisibleText = leadingText.slice(0, availableForLeadingText);
@@ -245,7 +264,7 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
   };
 }
 
-export function formatSearchResults(response: NormalizedSearchResponse, options: FormatOptions): string {
+export function formatSearchResults(response: NormalizedSearchResponse, options: SearchFormatOptions): string {
   return formatSearchResultsWithMetadata(response, options).text;
 }
 
@@ -258,7 +277,6 @@ export function formatFetchResultWithMetadata(response: NormalizedFetchResponse,
   const headerPrefix = "Fetched page:\n\nTitle: ";
   const betweenTitleAndContent = "\n\nContent:\n";
   const linksHeader = "\nLinks:\n";
-
   const fullText = `${headerPrefix}${response.title}${betweenTitleAndContent}${response.content}${linksHeader}${linksSection}`;
 
   if (fullText.length <= options.maxOutputChars) {

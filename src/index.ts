@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
 import { runOllamaWebFetch } from "./fetch.js";
+import { runOllamaWebReadFull } from "./read-full.js";
 import { formatOllamaWebError, runOllamaWebSearch } from "./search.js";
 
 const SearchParams = Type.Object({
@@ -10,6 +11,21 @@ const SearchParams = Type.Object({
 
 const FetchParams = Type.Object({
   url: Type.String({ description: "The URL to fetch using Ollama Web Fetch API." }),
+});
+
+const ReadFullParams = Type.Object({
+  ref: Type.String({ description: "A full-content ref returned by ollama_web_search or ollama_web_fetch." }),
+  section: Type.Optional(
+    Type.Union([
+      Type.Literal("title"),
+      Type.Literal("url"),
+      Type.Literal("content"),
+      Type.Literal("links"),
+    ], { description: "Single section/field to read. Defaults to content." }),
+  ),
+  resultIndex: Type.Optional(Type.Number({ description: "1-based search result index. Required for search refs." })),
+  offset: Type.Optional(Type.Number({ description: "Start offset for inline retrieval. Must be 0 or greater." })),
+  maxChars: Type.Optional(Type.Number({ description: "Maximum characters to return for inline retrieval." })),
 });
 
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
@@ -32,7 +48,12 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
       const result = await runOllamaWebSearch(params.query, { config, signal });
       return {
         content: [{ type: "text", text: result.formatted }],
-        details: result.normalized,
+        details: {
+          ...result.normalized,
+          fullContentRef: result.fullContentRef,
+          truncated: result.truncated,
+          retrieval: result.retrieval,
+        },
       };
     },
   });
@@ -54,7 +75,31 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
       const result = await runOllamaWebFetch(params.url, { config, signal });
       return {
         content: [{ type: "text", text: result.formatted }],
-        details: result.normalized,
+        details: {
+          ...result.normalized,
+          fullContentRef: result.fullContentRef,
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "ollama_web_read_full",
+    label: "Ollama Web Read Full",
+    description: "Read full content from previous web search/fetch results using a ref and one selected section.",
+    promptSnippet: "Recover full text from previous Ollama web search/fetch refs one field at a time.",
+    promptGuidelines: [
+      "Use ollama_web_read_full only with refs returned by previous ollama_web_search or ollama_web_fetch calls.",
+      "For search refs, pass resultIndex using the same 1-based numbering shown in search results.",
+      "Retrieve exactly one field at a time using section: title, url, or content.",
+    ],
+    parameters: ReadFullParams,
+
+    async execute(_toolCallId, params) {
+      const result = runOllamaWebReadFull(params);
+      return {
+        content: [{ type: "text", text: result.text }],
+        details: result.details,
       };
     },
   });
@@ -69,7 +114,12 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
             customType: "ollama-web-search-debug",
             content: result.formatted,
             display: true,
-            details: result.normalized,
+            details: {
+              ...result.normalized,
+              fullContentRef: result.fullContentRef,
+              truncated: result.truncated,
+              retrieval: result.retrieval,
+            },
           });
         } catch (error) {
           ctx.ui.notify(formatOllamaWebError(error), "error");
@@ -86,7 +136,10 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
             customType: "ollama-web-fetch-debug",
             content: result.formatted,
             display: true,
-            details: result.normalized,
+            details: {
+              ...result.normalized,
+              fullContentRef: result.fullContentRef,
+            },
           });
         } catch (error) {
           ctx.ui.notify(formatOllamaWebError(error), "error");
