@@ -30,8 +30,12 @@ function sliceByOffsetAndMaxChars(value: string, offset: number, maxChars?: numb
 
 export function runOllamaWebReadFull(input: RunOllamaWebReadFullInput): RunOllamaWebReadFullResult {
   const offset = input.offset ?? 0;
-  if (offset < 0) {
-    throw new Error("Offset must be 0 or greater.");
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new Error("Offset must be an integer greater than or equal to 0.");
+  }
+
+  if (input.maxChars !== undefined && (!Number.isInteger(input.maxChars) || input.maxChars < 1)) {
+    throw new Error("maxChars must be an integer greater than or equal to 1.");
   }
 
   const section = input.section ?? "content";

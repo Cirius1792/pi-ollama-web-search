@@ -172,6 +172,13 @@ describe("extension", () => {
     const sectionLiterals = sectionOptions.map((option: { const?: string }) => option.const).filter(Boolean);
     expect(sectionLiterals).toEqual(expect.arrayContaining(["title", "url", "content"]));
     expect(sectionLiterals).not.toContain("links");
+
+    expect(readFullTool?.parameters?.properties?.resultIndex?.type).toBe("integer");
+    expect(readFullTool?.parameters?.properties?.resultIndex?.minimum).toBe(1);
+    expect(readFullTool?.parameters?.properties?.offset?.type).toBe("integer");
+    expect(readFullTool?.parameters?.properties?.offset?.minimum).toBe(0);
+    expect(readFullTool?.parameters?.properties?.maxChars?.type).toBe("integer");
+    expect(readFullTool?.parameters?.properties?.maxChars?.minimum).toBe(1);
   });
 
   it("validates search retrieval inputs with explicit errors", async () => {
@@ -230,10 +237,26 @@ describe("extension", () => {
     );
 
     await expect(readFullTool!.execute("tool-4", { ref, section: "content", resultIndex: 1, offset: -1 }, undefined)).rejects.toThrow(
-      "Offset must be 0 or greater.",
+      "Offset must be an integer greater than or equal to 0.",
     );
 
-    const fetchResult = await fetchTool!.execute("tool-5", { url: "https://example.com/fetch" }, undefined);
+    await expect(readFullTool!.execute("tool-5", { ref, section: "content", resultIndex: 1.5 }, undefined)).rejects.toThrow(
+      "Search result index 1.5 is out of range. Valid range is 1-5.",
+    );
+
+    await expect(readFullTool!.execute("tool-6", { ref, section: "content", resultIndex: 1, offset: 0.5 }, undefined)).rejects.toThrow(
+      "Offset must be an integer greater than or equal to 0.",
+    );
+
+    await expect(readFullTool!.execute("tool-7", { ref, section: "content", resultIndex: 1, maxChars: 0 }, undefined)).rejects.toThrow(
+      "maxChars must be an integer greater than or equal to 1.",
+    );
+
+    await expect(readFullTool!.execute("tool-8", { ref, section: "content", resultIndex: 1, maxChars: 1.2 }, undefined)).rejects.toThrow(
+      "maxChars must be an integer greater than or equal to 1.",
+    );
+
+    const fetchResult = await fetchTool!.execute("tool-9", { url: "https://example.com/fetch" }, undefined);
     expect(fetchResult.details.fullContentRef).toBeUndefined();
   });
 });

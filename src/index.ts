@@ -22,9 +22,9 @@ const ReadFullParams = Type.Object({
       Type.Literal("content"),
     ], { description: "Single section/field to read. Defaults to content." }),
   ),
-  resultIndex: Type.Optional(Type.Number({ description: "1-based search result index. Required." })),
-  offset: Type.Optional(Type.Number({ description: "Start offset for inline retrieval. Must be 0 or greater." })),
-  maxChars: Type.Optional(Type.Number({ description: "Maximum characters to return for inline retrieval." })),
+  resultIndex: Type.Optional(Type.Integer({ minimum: 1, description: "1-based search result index. Required." })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Start offset for inline retrieval. Must be 0 or greater." })),
+  maxChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum characters to return for inline retrieval." })),
 });
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
