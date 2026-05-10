@@ -106,7 +106,7 @@ describe("extension", () => {
     expect(notify).toHaveBeenCalledWith(expect.stringContaining("OLLAMA_API_KEY is not set"), "warning");
   });
 
-  it("returns a full-content ref from search and reads back one search field by 1-based resultIndex", async () => {
+  it("returns search retrieval metadata and reads title/url/content through ollama_web_read_full", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
     vi.stubGlobal(
@@ -134,24 +134,55 @@ describe("extension", () => {
     expect(readFullTool).toBeDefined();
 
     const searchResult = await searchTool!.execute("tool-1", { query: "test query" }, undefined);
-    expect(searchResult.details.fullContentRef).toMatch(/^ws_s_/);
+    const ref = searchResult.details.fullContentRef;
 
-    const readResult = await readFullTool!.execute(
-      "tool-2",
-      { ref: searchResult.details.fullContentRef, section: "url", resultIndex: 2 },
-      undefined,
-    );
-
-    expect(readResult).toEqual({
-      content: [{ type: "text", text: "https://example.com/two" }],
-      details: {
-        ref: searchResult.details.fullContentRef,
-        kind: "search",
-        section: "url",
-        resultIndex: 2,
-        servedFrom: "cache",
-      },
+    expect(ref).toMatch(/^ws_s_/);
+    expect(searchResult.details.retrieval).toEqual({
+      kind: "search",
+      results: [
+        {
+          resultIndex: 1,
+          sections: {
+            title: { totalChars: 3 },
+            url: { totalChars: 23 },
+            content: { totalChars: 13 },
+          },
+        },
+        {
+          resultIndex: 2,
+          sections: {
+            title: { totalChars: 3 },
+            url: { totalChars: 23 },
+            content: { totalChars: 14 },
+          },
+        },
+      ],
     });
+
+    const retrievalCases = [
+      { section: "title", resultIndex: 1, expectedText: "One" },
+      { section: "url", resultIndex: 2, expectedText: "https://example.com/two" },
+      { section: "content", resultIndex: 2, expectedText: "Second content" },
+    ] as const;
+
+    for (const testCase of retrievalCases) {
+      const readResult = await readFullTool!.execute(
+        `tool-read-${testCase.section}`,
+        { ref, section: testCase.section, resultIndex: testCase.resultIndex },
+        undefined,
+      );
+
+      expect(readResult).toEqual({
+        content: [{ type: "text", text: testCase.expectedText }],
+        details: {
+          ref,
+          kind: "search",
+          section: testCase.section,
+          resultIndex: testCase.resultIndex,
+          servedFrom: "cache",
+        },
+      });
+    }
   });
 
   it("omits read-full metadata when search returns no results", async () => {
@@ -283,7 +314,11 @@ describe("extension", () => {
       "maxChars must be an integer greater than or equal to 1.",
     );
 
-    const fetchResult = await fetchTool!.execute("tool-9", { url: "https://example.com/fetch" }, undefined);
+    await expect(readFullTool!.execute("tool-9", { ref, section: "summary" as any, resultIndex: 1 }, undefined)).rejects.toThrow(
+      "section must be one of: title, url, content.",
+    );
+
+    const fetchResult = await fetchTool!.execute("tool-10", { url: "https://example.com/fetch" }, undefined);
     expect(fetchResult.details.fullContentRef).toBeUndefined();
   });
 });

@@ -4,15 +4,20 @@ A reusable [pi](https://pi.dev) package that exposes Ollama web APIs as custom p
 
 ## What it provides
 
-This package registers two production tools:
+This package registers three production tools:
 
 - `ollama_web_search`
 - `ollama_web_fetch`
+- `ollama_web_read_full`
 
 Tool behavior:
 
 - `ollama_web_search` accepts a search query and returns web results with title, URL, and content snippets.
+  - When results are present, tool `details` includes:
+    - `fullContentRef`: opaque ref used for follow-up retrieval.
+    - `retrieval`: per-result metadata (`resultIndex` + available sections with character counts).
 - `ollama_web_fetch` accepts a URL and returns fetched page title, content, and discovered links.
+- `ollama_web_read_full` accepts a `fullContentRef` from search and retrieves exactly one section (`title`, `url`, or `content`) for a 1-based `resultIndex`.
 
 ## Install
 
@@ -53,11 +58,21 @@ The extension includes prompt guidance so pi proactively uses tools when appropr
 
 - `ollama_web_search` for unknown URLs, documentation/reference lookup, and requests about latest/current/recent information.
 - `ollama_web_fetch` when a URL is known (or provided by the user), and before quoting/summarizing details from a specific page.
+- `ollama_web_read_full` after search truncation (or when more detail is needed) to retrieve one field from one search result at a time.
+
+### Search retrieval flow
+
+1. Run `ollama_web_search` with a query.
+2. Read `details.fullContentRef` and `details.retrieval` from the search response.
+3. Call `ollama_web_read_full` with:
+   - `ref`: the `fullContentRef` value,
+   - `resultIndex`: 1-based result number,
+   - `section`: one of `title`, `url`, or `content`.
 
 Example prompts:
 
 ```text
-Search for recent Ollama engine updates, then fetch the official blog post URL and summarize details.
+Search for recent Ollama engine updates. If the output is truncated, use the returned full-content ref to read the full content for result 1.
 ```
 
 ```text
