@@ -331,6 +331,46 @@ describe("extension", () => {
     ).rejects.toThrow(`No stored full content found for ref: ${fullContentRef}`);
   });
 
+  it("isolates fetch retrieval refs between extension instances", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          title: "Example title",
+          content: "Long content body",
+          links: ["https://example.com/a", "https://example.com/b"],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const fakeA = createFakePi();
+    const fakeB = createFakePi();
+    extension(fakeA.pi as any);
+    extension(fakeB.pi as any);
+
+    const fetchToolA = fakeA.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullToolA = fakeA.tools.find((tool) => tool.name === "ollama_web_read_full");
+    const readFullToolB = fakeB.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResultA = await fetchToolA?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRefA = fetchResultA?.details?.fullContentRef;
+
+    await expect(
+      readFullToolB?.execute("call-2", { fullContentRef: fullContentRefA, section: "content" }, new AbortController().signal),
+    ).rejects.toThrow(`No stored full content found for ref: ${fullContentRefA}`);
+
+    await fakeB.handlers.session_start({}, { hasUI: false, ui: { notify: vi.fn() } });
+
+    await expect(
+      readFullToolA?.execute("call-3", { fullContentRef: fullContentRefA, section: "content" }, new AbortController().signal),
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: "Long content body" }],
+    });
+  });
+
   it("does not register the debug command by default", () => {
     const fake = createFakePi();
     extension(fake.pi as any);
