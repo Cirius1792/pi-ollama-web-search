@@ -12,11 +12,13 @@ vi.mock("node:fs/promises", () => ({
 
 import {
   FETCH_RETRIEVAL_STORE_MAX_ENTRIES,
+  clearFetchRetrievalStore,
   readFullFetchContent,
   registerFetchRetrieval,
 } from "../src/retrieval.js";
 
 beforeEach(() => {
+  clearFetchRetrievalStore();
   mkdirMock.mockReset();
   writeFileMock.mockReset();
   mkdirMock.mockImplementation(async (..._args: unknown[]) => {});
@@ -72,6 +74,34 @@ describe("readFullFetchContent abort handling", () => {
 
     expect(mkdirMock).toHaveBeenCalledTimes(1);
     expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it("writes file mode exports to a generated temp path instead of a caller-provided outputPath", async () => {
+    const record = registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    const result = await readFullFetchContent({
+      fullContentRef: record.fullContentRef,
+      section: "content",
+      mode: "file",
+      outputPath: "/tmp/unsafe-user-path.txt",
+    });
+
+    expect(result.mode).toBe("file");
+    if (result.mode !== "file") {
+      throw new Error("Expected file mode result");
+    }
+
+    expect(result.details.outputPath).not.toBe("/tmp/unsafe-user-path.txt");
+    expect(mkdirMock).toHaveBeenCalledWith(expect.any(String), { recursive: true });
+    expect(writeFileMock).toHaveBeenCalledWith(
+      result.details.outputPath,
+      "Long content",
+      expect.objectContaining({ encoding: "utf8" }),
+    );
   });
 
   it("propagates abort signal into writeFile so an in-progress write can cancel", async () => {
@@ -138,6 +168,31 @@ describe("registerFetchRetrieval store retention", () => {
       mode: "inline",
       text: "same content",
     });
+  });
+
+  it("evicts older refs when cumulative retained fetch bytes exceed the budget", async () => {
+    const oldest = registerFetchRetrieval({
+      title: "first",
+      content: "a".repeat(900_000),
+      links: ["https://example.com/first"],
+    });
+
+    const newest = registerFetchRetrieval({
+      title: "second",
+      content: "b".repeat(900_000),
+      links: ["https://example.com/second"],
+    });
+
+    await expect(readFullFetchContent({ fullContentRef: newest.fullContentRef, section: "content" })).resolves.toMatchObject({
+      mode: "inline",
+    });
+
+    await expect(
+      readFullFetchContent({
+        fullContentRef: oldest.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${oldest.fullContentRef}`);
   });
 
   it("evicts older refs after the bounded store limit is exceeded", async () => {
