@@ -50,6 +50,27 @@ describe("formatSearchResults", () => {
     expect(text).toContain("[Output truncated to 180 characters");
   });
 
+  it("never exceeds the safety cap when maxOutputChars is tiny", () => {
+    const maxOutputChars = 20;
+    const text = formatSearchResults(
+      {
+        results: [
+          {
+            title: "Large Result",
+            url: "https://example.com/large",
+            content: "x".repeat(500),
+          },
+        ],
+      },
+      {
+        maxOutputChars,
+        fullContentRef: "ref-123",
+      },
+    );
+
+    expect(text.length).toBeLessThanOrEqual(maxOutputChars);
+  });
+
   it("avoids partial title/url metadata when truncating search output", () => {
     const result = formatSearchResultsWithMetadata(
       {
