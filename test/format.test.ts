@@ -213,6 +213,20 @@ describe("formatFetchResult", () => {
     expect(text).toContain("fetch:fallback-truncation");
   });
 
+  it("keeps read-full guidance when truncation and a long title force a final safety slice", () => {
+    const text = formatFetchResult(
+      {
+        title: "Very long title ".repeat(30),
+        content: "Non-empty content that still needs retrieval guidance.",
+        links: ["https://example.com/1"],
+      },
+      { maxOutputChars: 180, fullContentRef: "fetch:long-title-regression" },
+    );
+
+    expect(text).toContain("ollama_web_read_full");
+    expect(text).toContain("fetch:long-title-regression");
+  });
+
   it("does not mention read-full retrieval when output is not truncated", () => {
     const text = formatFetchResult(
       {
