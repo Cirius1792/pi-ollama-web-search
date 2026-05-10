@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { NormalizedFetchResponse, NormalizedSearchResponse } from "./normalize.js";
 
 export type FullContentRefKind = "search" | "fetch";
@@ -37,21 +38,57 @@ export interface StoredFetchContent {
 
 export type StoredFullContent = StoredSearchContent | StoredFetchContent;
 
-const contentStore = new Map<string, StoredFullContent>();
-let nextRefId = 1;
+const FULL_CONTENT_STORE_MAX_ENTRIES = 128;
+const FULL_CONTENT_STORE_TTL_MS = 15 * 60 * 1000;
 
-function nextRefToken(): string {
-  const token = nextRefId.toString(36).padStart(6, "0");
-  nextRefId += 1;
-  return token;
+interface StoredEntry {
+  value: StoredFullContent;
+  expiresAtMs: number;
+}
+
+const contentStore = new Map<string, StoredEntry>();
+
+function pruneExpiredEntries(nowMs: number): void {
+  for (const [ref, entry] of contentStore) {
+    if (entry.expiresAtMs <= nowMs) {
+      contentStore.delete(ref);
+    }
+  }
+}
+
+function enforceMaxEntries(): void {
+  while (contentStore.size > FULL_CONTENT_STORE_MAX_ENTRIES) {
+    const oldestRef = contentStore.keys().next().value;
+    if (!oldestRef) {
+      return;
+    }
+    contentStore.delete(oldestRef);
+  }
+}
+
+function rememberContent(entry: StoredFullContent): void {
+  const nowMs = Date.now();
+  pruneExpiredEntries(nowMs);
+
+  contentStore.delete(entry.ref);
+  contentStore.set(entry.ref, {
+    value: entry,
+    expiresAtMs: nowMs + FULL_CONTENT_STORE_TTL_MS,
+  });
+
+  enforceMaxEntries();
+}
+
+function createOpaqueRefToken(): string {
+  return randomBytes(12).toString("base64url");
 }
 
 export function createFullContentRef(kind: FullContentRefKind): string {
-  return kind === "search" ? `ws_s_${nextRefToken()}` : `ws_f_${nextRefToken()}`;
+  return kind === "search" ? `ws_s_${createOpaqueRefToken()}` : `ws_f_${createOpaqueRefToken()}`;
 }
 
 export function rememberSearchContent(input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }): void {
-  contentStore.set(input.ref, {
+  rememberContent({
     kind: "search",
     ref: input.ref,
     query: input.query,
@@ -61,7 +98,7 @@ export function rememberSearchContent(input: { ref: string; query: string; maxRe
 }
 
 export function rememberFetchContent(input: { ref: string; url: string; payload: NormalizedFetchResponse }): void {
-  contentStore.set(input.ref, {
+  rememberContent({
     kind: "fetch",
     ref: input.ref,
     url: input.url,
@@ -70,7 +107,17 @@ export function rememberFetchContent(input: { ref: string; url: string; payload:
 }
 
 export function getStoredFullContent(ref: string): StoredFullContent | undefined {
-  return contentStore.get(ref);
+  const nowMs = Date.now();
+  pruneExpiredEntries(nowMs);
+
+  const entry = contentStore.get(ref);
+  if (!entry) {
+    return undefined;
+  }
+
+  contentStore.delete(ref);
+  contentStore.set(ref, entry);
+  return entry.value;
 }
 
 export function buildSearchRetrievalMetadata(payload: NormalizedSearchResponse): SearchRetrievalMetadata {
