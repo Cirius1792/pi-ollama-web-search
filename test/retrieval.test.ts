@@ -202,6 +202,7 @@ describe("readFullFetchContent file exports", () => {
       throw new Error("Expected file mode result");
     }
 
+    expect(result.details.servedFrom).toBe("cache");
     expect(result.details.outputPath).toBe("/workspace/project/exports/full/content.txt");
     expect(result.details.temporary).toBe(false);
     expect(result.details.overwritten).toBe(false);
@@ -235,6 +236,25 @@ describe("readFullFetchContent file exports", () => {
     expect(writeFileMock).not.toHaveBeenCalled();
   });
 
+  it("checks abort and ref validity before explicit file preflight", async () => {
+    const store = createFetchRetrievalStore();
+    const controller = new AbortController();
+    controller.abort();
+    accessMock.mockResolvedValueOnce();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: "fetch:missing",
+        section: "content",
+        mode: "file",
+        outputPath: "/workspace/project/export.txt",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(accessMock).not.toHaveBeenCalled();
+  });
+
   it("overwrites an existing explicit export only when overwrite=true", async () => {
     const store = createFetchRetrievalStore();
     const record = store.registerFetchRetrieval({
@@ -258,6 +278,7 @@ describe("readFullFetchContent file exports", () => {
       throw new Error("Expected file mode result");
     }
 
+    expect(result.details.servedFrom).toBe("cache");
     expect(result.details.outputPath).toBe("/workspace/project/export.txt");
     expect(result.details.temporary).toBe(false);
     expect(result.details.overwritten).toBe(true);
@@ -287,6 +308,7 @@ describe("readFullFetchContent file exports", () => {
       throw new Error("Expected file mode result");
     }
 
+    expect(result.details.servedFrom).toBe("cache");
     expect(result.details.outputPath).toContain("pi-ollama-web-search-");
     expect(result.details.outputPath.startsWith(tmpdir())).toBe(true);
     expect(result.details.temporary).toBe(true);
@@ -301,317 +323,758 @@ describe("readFullFetchContent file exports", () => {
   });
 });
 
-describe("readFullFetchContent replay recovery", () => {
-  it("replays payload on cache miss and returns servedFrom replay with same ref", async () => {
+describe("registerFetchRetrieval replay recovery", () => {
+  it("replays evicted refs for inline reads, rebuilds the cache under the same ref, and reports servedFrom", async () => {
     const replayFetch = vi.fn().mockResolvedValue({
-      title: "Replayed title",
-      content: "Replayed content",
-      links: ["https://example.com/replayed"],
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
     });
 
     const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
+
+    const original = store.registerFetchRetrieval(
       {
         title: "Original title",
         content: "Original content",
         links: ["https://example.com/original"],
       },
-      { sourceUrl: "https://example.com/source" },
+      {
+        url: "https://example.com/original",
+      },
     );
 
     store.registerFetchRetrieval({
-      title: "Oversized",
+      title: "Evictor",
       content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
+      links: ["https://example.com/evictor"],
     });
 
-    const result = await store.readFullFetchContent({
-      fullContentRef: replayable.fullContentRef,
+    const replayed = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
       section: "content",
     });
 
-    expect(result.mode).toBe("inline");
-    if (result.mode !== "inline") {
-      throw new Error("Expected inline mode result");
-    }
-
-    expect(result.text).toBe("Replayed content");
-    expect(result.details.fullContentRef).toBe(replayable.fullContentRef);
-    expect(result.details.servedFrom).toBe("replay");
-    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/source", signal: undefined });
+    expect(replayed).toMatchObject({
+      mode: "inline",
+      text: "Replay content",
+      details: {
+        mode: "inline",
+        target: "fetch",
+        section: "content",
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
 
     const cached = await store.readFullFetchContent({
-      fullContentRef: replayable.fullContentRef,
+      fullContentRef: original.fullContentRef,
       section: "content",
     });
 
-    expect(cached.mode).toBe("inline");
-    if (cached.mode !== "inline") {
-      throw new Error("Expected inline mode result");
-    }
-
-    expect(cached.text).toBe("Replayed content");
-    expect(cached.details.servedFrom).toBe("cache");
+    expect(cached).toMatchObject({
+      mode: "inline",
+      text: "Replay content",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
     expect(replayFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("rethrows AbortError unchanged when abort fires during replay before cache write", async () => {
-    const abortError = new Error("The operation was aborted.");
-    abortError.name = "AbortError";
-
-    const controller = new AbortController();
-    const replayFetch = vi
-      .fn()
-      .mockImplementationOnce(async () => {
-        await Promise.resolve();
-        controller.abort(abortError);
-        return {
-          title: "Replayed title",
-          content: "Replayed content",
-          links: ["https://example.com/replayed"],
-        };
-      })
-      .mockResolvedValueOnce({
-        title: "Replayed title",
-        content: "Replayed content",
-        links: ["https://example.com/replayed"],
-      });
+  it("replays evicted refs for file exports and preserves existing export behavior", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay file body",
+      links: ["https://example.com/replay"],
+    });
 
     const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
+
+    const original = store.registerFetchRetrieval(
       {
         title: "Original title",
         content: "Original content",
         links: ["https://example.com/original"],
       },
-      { sourceUrl: "https://example.com/source" },
+      {
+        url: "https://example.com/original",
+      },
     );
 
     store.registerFetchRetrieval({
-      title: "Oversized",
+      title: "Evictor",
       content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
+      links: ["https://example.com/evictor"],
     });
 
-    await expect(
-      store.readFullFetchContent({
-        fullContentRef: replayable.fullContentRef,
-        section: "content",
-        signal: controller.signal,
-      }),
-    ).rejects.toBe(abortError);
-
-    const replayedAfterAbort = await store.readFullFetchContent({
-      fullContentRef: replayable.fullContentRef,
+    const result = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
       section: "content",
+      mode: "file",
+      outputPath: "/workspace/project/export.txt",
     });
 
-    expect(replayedAfterAbort.mode).toBe("inline");
-    if (replayedAfterAbort.mode !== "inline") {
-      throw new Error("Expected inline mode result");
-    }
-
-    expect(replayedAfterAbort.text).toBe("Replayed content");
-    expect(replayedAfterAbort.details.servedFrom).toBe("replay");
-    expect(replayFetch).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      mode: "file",
+      details: {
+        mode: "file",
+        target: "fetch",
+        section: "content",
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+        outputPath: "/workspace/project/export.txt",
+        charsWritten: "Replay file body".length,
+        temporary: false,
+        overwritten: false,
+      },
+    });
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/workspace/project/export.txt",
+      "Replay file body",
+      expect.objectContaining({ encoding: "utf8", flag: "wx" }),
+    );
   });
 
-  it("returns combined cache-miss envelope when replay also fails", async () => {
+  it("includes cache-miss and replay-failure context when fetch replay fails", async () => {
     const replayFetch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
+
     const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
+
+    const original = store.registerFetchRetrieval(
       {
         title: "Original title",
         content: "Original content",
         links: ["https://example.com/original"],
       },
-      { sourceUrl: "https://example.com/source" },
+      {
+        url: "https://example.com/original",
+      },
     );
 
     store.registerFetchRetrieval({
-      title: "Oversized",
+      title: "Evictor",
       content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
+      links: ["https://example.com/evictor"],
     });
 
     await expect(
       store.readFullFetchContent({
-        fullContentRef: replayable.fullContentRef,
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}. Replay failed: upstream unavailable`);
+  });
+
+  it("includes cache-miss and replay-failure context when fetch replay returns a malformed payload", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      links: ["https://example.com/replay"],
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
         section: "content",
       }),
     ).rejects.toThrow(
-      `No stored full content found for ref: ${replayable.fullContentRef}. Replay also failed: upstream unavailable`,
+      `No stored full content found for ref: ${original.fullContentRef}. Replay failed: Unexpected Ollama web fetch response: content must be a string`,
     );
   });
 
-  it("validates inline offset and maxChars before replaying an evicted ref", async () => {
-    const replayFetch = vi.fn().mockResolvedValue({
-      title: "Replayed title",
-      content: "Replayed content",
-      links: ["https://example.com/replayed"],
+  it("aborts an in-progress fetch replay when its only waiting caller aborts and preserves AbortError", async () => {
+    const controller = new AbortController();
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    let replaySignal: AbortSignal | undefined;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replaySignal = params.signal;
+      queueMicrotask(() => {
+        controller.abort();
+      });
+      return new Promise<never>((_resolve, reject) => {
+        params.signal?.addEventListener(
+          "abort",
+          () => {
+            reject(abortError);
+          },
+          { once: true },
+        );
+      });
     });
+
     const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
+
+    const original = store.registerFetchRetrieval(
       {
         title: "Original title",
         content: "Original content",
         links: ["https://example.com/original"],
       },
-      { sourceUrl: "https://example.com/source" },
+      {
+        url: "https://example.com/original",
+      },
     );
 
     store.registerFetchRetrieval({
-      title: "Oversized",
+      title: "Evictor",
       content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
+      links: ["https://example.com/evictor"],
     });
 
     await expect(
       store.readFullFetchContent({
-        fullContentRef: replayable.fullContentRef,
+        fullContentRef: original.fullContentRef,
+        section: "content",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+    expect(replayFetch.mock.calls[0]?.[0]).toMatchObject({ url: "https://example.com/original" });
+    expect(replaySignal).toBeDefined();
+    expect(replaySignal).not.toBe(controller.signal);
+    expect(replaySignal?.aborted).toBe(true);
+  });
+
+  it("rejects an already-aborted signal before starting fetch replay", async () => {
+    const controller = new AbortController();
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    controller.abort();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(replayFetch).not.toHaveBeenCalled();
+  });
+
+  it("validates inline parameters before starting fetch replay", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
         section: "content",
         offset: -1,
       }),
     ).rejects.toThrow("offset must be a non-negative integer.");
 
-    await expect(
-      store.readFullFetchContent({
-        fullContentRef: replayable.fullContentRef,
-        section: "content",
-        maxChars: 0,
-      }),
-    ).rejects.toThrow("maxChars must be a positive integer.");
-
     expect(replayFetch).not.toHaveBeenCalled();
   });
 
-  it("validates explicit file output preconditions before replaying an evicted ref", async () => {
+  it("checks explicit file overwrite preflight before starting fetch replay", async () => {
     const replayFetch = vi.fn().mockResolvedValue({
-      title: "Replayed title",
-      content: "Replayed content",
-      links: ["https://example.com/replayed"],
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
     });
     const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
+
+    const original = store.registerFetchRetrieval(
       {
         title: "Original title",
         content: "Original content",
         links: ["https://example.com/original"],
       },
-      { sourceUrl: "https://example.com/source" },
+      {
+        url: "https://example.com/original",
+      },
     );
 
     store.registerFetchRetrieval({
-      title: "Oversized",
+      title: "Evictor",
       content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
+      links: ["https://example.com/evictor"],
     });
-
     accessMock.mockResolvedValueOnce();
 
     await expect(
       store.readFullFetchContent({
-        fullContentRef: replayable.fullContentRef,
+        fullContentRef: original.fullContentRef,
         section: "content",
         mode: "file",
         outputPath: "/workspace/project/export.txt",
-        overwrite: false,
       }),
     ).rejects.toThrow("File already exists: /workspace/project/export.txt. Pass overwrite=true to replace it.");
 
     expect(replayFetch).not.toHaveBeenCalled();
-    expect(writeFileMock).not.toHaveBeenCalled();
   });
 
-  it("trims sourceUrl before storing replay metadata", async () => {
-    const replayFetch = vi.fn().mockResolvedValue({
-      title: "Replayed title",
-      content: "Replayed content",
-      links: ["https://example.com/replayed"],
-    });
+  it("dedupes concurrent replays for the same evicted fetch ref", async () => {
+    let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
+    const replayFetch = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
+          resolveReplay = resolve;
+        }),
+    );
+
     const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
+
+    const original = store.registerFetchRetrieval(
       {
         title: "Original title",
         content: "Original content",
         links: ["https://example.com/original"],
       },
-      { sourceUrl: "  https://example.com/source  " },
-    );
-
-    store.registerFetchRetrieval({
-      title: "Oversized",
-      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
-    });
-
-    await store.readFullFetchContent({
-      fullContentRef: replayable.fullContentRef,
-      section: "content",
-    });
-
-    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/source", signal: undefined });
-  });
-
-  it("rebuilds payload for file mode reads after replay", async () => {
-    const replayFetch = vi.fn().mockResolvedValue({
-      title: "Replayed title",
-      content: "Replayed content",
-      links: ["https://example.com/replayed"],
-    });
-    const store = createFetchRetrievalStore({ replayFetch });
-    const replayable = store.registerFetchRetrieval(
       {
-        title: "Original title",
-        content: "Original content",
-        links: ["https://example.com/original"],
+        url: "https://example.com/original",
       },
-      { sourceUrl: "https://example.com/source" },
     );
 
     store.registerFetchRetrieval({
-      title: "Oversized",
+      title: "Evictor",
       content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
-      links: ["https://example.com/oversized"],
+      links: ["https://example.com/evictor"],
     });
 
-    const fileResult = await store.readFullFetchContent({
-      fullContentRef: replayable.fullContentRef,
+    const firstRead = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
       section: "content",
-      mode: "file",
-      outputPath: "/workspace/project/replayed.txt",
     });
-
-    expect(fileResult.mode).toBe("file");
-    if (fileResult.mode !== "file") {
-      throw new Error("Expected file mode result");
-    }
-
-    expect(fileResult.details.fullContentRef).toBe(replayable.fullContentRef);
-    expect(fileResult.details.servedFrom).toBe("replay");
-    expect(writeFileMock).toHaveBeenCalledWith(
-      "/workspace/project/replayed.txt",
-      "Replayed content",
-      expect.objectContaining({ encoding: "utf8", flag: "wx" }),
-    );
-
-    const cachedInline = await store.readFullFetchContent({
-      fullContentRef: replayable.fullContentRef,
+    const secondRead = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
       section: "content",
     });
 
-    expect(cachedInline.mode).toBe("inline");
-    if (cachedInline.mode !== "inline") {
-      throw new Error("Expected inline mode result");
-    }
+    expect(replayFetch).toHaveBeenCalledTimes(1);
 
-    expect(cachedInline.details.servedFrom).toBe("cache");
-    expect(cachedInline.text).toBe("Replayed content");
+    resolveReplay?.({
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
+    });
+
+    await expect(Promise.all([firstRead, secondRead])).resolves.toEqual([
+      expect.objectContaining({
+        mode: "inline",
+        text: "Replay content",
+        details: expect.objectContaining({
+          fullContentRef: original.fullContentRef,
+          servedFrom: "replay",
+        }),
+      }),
+      expect.objectContaining({
+        mode: "inline",
+        text: "Replay content",
+        details: expect.objectContaining({
+          fullContentRef: original.fullContentRef,
+          servedFrom: "replay",
+        }),
+      }),
+    ]);
+
+    const cached = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(cached).toMatchObject({
+      mode: "inline",
+      text: "Replay content",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
     expect(replayFetch).toHaveBeenCalledTimes(1);
   });
-});
 
-describe("registerFetchRetrieval store retention", () => {
+  it("rejects an aborted waiter promptly without aborting unrelated waiters sharing the replay", async () => {
+    const secondController = new AbortController();
+    let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
+    let replaySignal: AbortSignal | undefined;
+    const replayFetch = vi.fn().mockImplementation(
+      async (params: { url: string; signal?: AbortSignal }) => {
+        replaySignal = params.signal;
+        return new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
+          resolveReplay = resolve;
+        });
+      },
+    );
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const firstRead = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+    const secondRead = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+      signal: secondController.signal,
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    let secondStatus = "pending";
+    secondRead.then(
+      () => {
+        secondStatus = "resolved";
+      },
+      (error: unknown) => {
+        secondStatus = error instanceof Error ? error.name : String(error);
+      },
+    );
+
+    try {
+      secondController.abort();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(secondStatus).toBe("AbortError");
+      expect(replaySignal?.aborted).toBe(false);
+
+      resolveReplay?.({
+        title: "Replay title",
+        content: "Replay content",
+        links: ["https://example.com/replay"],
+      });
+
+      await expect(firstRead).resolves.toMatchObject({
+        mode: "inline",
+        text: "Replay content",
+        details: {
+          fullContentRef: original.fullContentRef,
+          servedFrom: "replay",
+        },
+      });
+      await expect(secondRead).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      resolveReplay?.({
+        title: "Replay title",
+        content: "Replay content",
+        links: ["https://example.com/replay"],
+      });
+    }
+  });
+
+  it("aborts the upstream replay once all concurrent waiters abort", async () => {
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    let replaySignal: AbortSignal | undefined;
+    const replayFetch = vi.fn().mockImplementation(
+      async (params: { url: string; signal?: AbortSignal }) => {
+        replaySignal = params.signal;
+        return new Promise<never>((_resolve, reject) => {
+          params.signal?.addEventListener(
+            "abort",
+            () => {
+              reject(abortError);
+            },
+            { once: true },
+          );
+        });
+      },
+    );
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const firstRead = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+      signal: firstController.signal,
+    });
+    const secondRead = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+      signal: secondController.signal,
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    firstController.abort();
+    await expect(firstRead).rejects.toMatchObject({ name: "AbortError" });
+    expect(replaySignal?.aborted).toBe(false);
+
+    secondController.abort();
+    await expect(secondRead).rejects.toMatchObject({ name: "AbortError" });
+    expect(replaySignal?.aborted).toBe(true);
+  });
+
+  it("starts a fresh replay after the last waiter aborts even if the aborted replay has not settled yet", async () => {
+    const waitingController = new AbortController();
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    let firstReplayReject: ((reason?: unknown) => void) | undefined;
+    let firstReplaySignal: AbortSignal | undefined;
+    let replayAttempt = 0;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replayAttempt += 1;
+
+      if (replayAttempt === 1) {
+        firstReplaySignal = params.signal;
+        return new Promise<never>((_resolve, reject) => {
+          firstReplayReject = reject;
+        });
+      }
+
+      return {
+        title: "Fresh replay title",
+        content: "Fresh replay content",
+        links: ["https://example.com/fresh-replay"],
+      };
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const abortedWaiter = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+      signal: waitingController.signal,
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    waitingController.abort();
+    await expect(abortedWaiter).rejects.toMatchObject({ name: "AbortError" });
+    expect(firstReplaySignal?.aborted).toBe(true);
+
+    const freshCaller = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    await expect(freshCaller).resolves.toMatchObject({
+      mode: "inline",
+      text: "Fresh replay content",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledTimes(2);
+
+    firstReplayReject?.(abortError);
+  });
+
+  it("aborts in-flight fetch replays when the store is cleared", async () => {
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    let replayReject: ((reason?: unknown) => void) | undefined;
+    let replaySignal: AbortSignal | undefined;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replaySignal = params.signal;
+      return new Promise<never>((_resolve, reject) => {
+        replayReject = reject;
+      });
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const readDuringReplay = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    store.clearFetchRetrievalStore();
+
+    expect(replaySignal?.aborted).toBe(true);
+
+    replayReject?.(abortError);
+    await expect(readDuringReplay).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}`);
+  });
+
+  it("does not repopulate cleared fetch state when an aborted replay resolves late", async () => {
+    let replaySignal: AbortSignal | undefined;
+    let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replaySignal = params.signal;
+      return new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
+        resolveReplay = resolve;
+      });
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const readDuringReplay = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    store.clearFetchRetrievalStore();
+
+    expect(replaySignal?.aborted).toBe(true);
+
+    resolveReplay?.({
+      title: "Late replay title",
+      content: "Late replay content",
+      links: ["https://example.com/late-replay"],
+    });
+
+    await expect(readDuringReplay).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}`);
+  });
+
   it("issues unique refs for identical payloads", async () => {
     const payload = {
       title: "same title",
@@ -684,6 +1147,169 @@ describe("registerFetchRetrieval store retention", () => {
         section: "content",
       }),
     ).rejects.toThrow(`No stored full content found for ref: ${oldest.fullContentRef}`);
+  });
+
+  it("replays refs after count-based payload eviction and rebuilds the cache under the same ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content after count eviction",
+      links: ["https://example.com/replay"],
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES; i += 1) {
+      store.registerFetchRetrieval({
+        title: `title-${i}`,
+        content: `payload-${i}`,
+        links: [`https://example.com/${i}`],
+      });
+    }
+
+    const replayed = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayed).toMatchObject({
+      mode: "inline",
+      text: "Replay content after count eviction",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
+
+    const cached = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(cached).toMatchObject({
+      mode: "inline",
+      text: "Replay content after count eviction",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the store-level replay dependency when refs only retain lightweight replay metadata", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content from store-level dependency",
+      links: ["https://example.com/replay"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES; i += 1) {
+      store.registerFetchRetrieval({
+        title: `title-${i}`,
+        content: `payload-${i}`,
+        links: [`https://example.com/${i}`],
+      });
+    }
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).resolves.toMatchObject({
+      mode: "inline",
+      text: "Replay content from store-level dependency",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
+  });
+
+  it("retains replay metadata for older fetch refs even after many newer refs are registered", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content after metadata pressure",
+      links: ["https://example.com/replay"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const oldest = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES * 8; i += 1) {
+      store.registerFetchRetrieval({
+        title: `title-${i}`,
+        content: `payload-${i}`,
+        links: [`https://example.com/${i}`],
+      });
+    }
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: oldest.fullContentRef,
+        section: "content",
+      }),
+    ).resolves.toMatchObject({
+      mode: "inline",
+      text: "Replay content after metadata pressure",
+      details: {
+        fullContentRef: oldest.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: oldest.fullContentRef,
+        section: "content",
+      }),
+    ).resolves.toMatchObject({
+      mode: "inline",
+      text: "Replay content after metadata pressure",
+      details: {
+        fullContentRef: oldest.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
   });
 
   it("evicts older refs after the bounded store limit is exceeded", async () => {

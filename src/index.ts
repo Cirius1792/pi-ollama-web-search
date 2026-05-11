@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { fetchOllamaWeb, searchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
 import { runOllamaWebFetch } from "./fetch.js";
-import { normalizeWebFetchResponse, normalizeWebSearchResponse } from "./normalize.js";
+import { normalizeWebSearchResponse } from "./normalize.js";
 import { runOllamaWebReadFull } from "./read-full.js";
 import { createFetchRetrievalStore } from "./retrieval.js";
 import { formatOllamaWebError, runOllamaWebSearch } from "./search.js";
@@ -52,6 +52,44 @@ const ReadFullParams = Type.Object({
   overwrite: Type.Optional(Type.Boolean({ description: "Allow fetch file mode to overwrite an existing explicit path. Defaults to false." })),
 });
 
+function formatReadFullResult(result: Awaited<ReturnType<typeof runOllamaWebReadFull>>) {
+  if (result.mode === "file") {
+    const message = result.details.temporary
+      ? `Wrote full section to ${result.details.outputPath}. This temp export will be deleted at session shutdown.`
+      : `Wrote full section to ${result.details.outputPath}. Delete this file when you no longer need it.`;
+
+    return {
+      content: message,
+      details: result.details,
+    };
+  }
+
+  return {
+    content: result.text,
+    details: result.details,
+  };
+}
+
+function parseReadFullDebugArgs(args: string): Omit<Parameters<typeof runOllamaWebReadFull>[0], "signal" | "cwd"> {
+  const trimmedArgs = args.trim();
+  if (!trimmedArgs) {
+    throw new Error('Provide JSON arguments, for example: /ollama-read-full {"ref":"fetch:...","section":"content"}');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmedArgs);
+  } catch {
+    throw new Error('Invalid JSON. Example: /ollama-read-full {"ref":"fetch:...","section":"content"}');
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Read-full debug arguments must be a JSON object.");
+  }
+
+  return parsed;
+}
+
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
   const fetchRetrievalStore = createFetchRetrievalStore({
@@ -60,14 +98,12 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         throw new Error(getMissingApiKeyMessage());
       }
 
-      const replayRaw = await fetchOllamaWeb({
+      return fetchOllamaWeb({
         endpoint: config.fetchEndpoint,
         apiKey: config.apiKey,
         url,
         signal,
       });
-
-      return normalizeWebFetchResponse(replayRaw);
     },
   });
   const searchContentStore = createSearchContentStore({
@@ -76,7 +112,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         throw new Error(getMissingApiKeyMessage());
       }
 
-      const replayRaw = await searchOllamaWeb({
+      const raw = await searchOllamaWeb({
         endpoint: config.searchEndpoint,
         apiKey: config.apiKey,
         query,
@@ -84,7 +120,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         signal,
       });
 
-      return normalizeWebSearchResponse(replayRaw);
+      return normalizeWebSearchResponse(raw);
     },
   });
 
@@ -168,21 +204,10 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
           readSearchContent: searchContentStore.readSearchContent,
         },
       );
-
-      if (result.mode === "file") {
-        const message = result.details.temporary
-          ? `Wrote full section to ${result.details.outputPath}. This temp export will be deleted at session shutdown.`
-          : `Wrote full section to ${result.details.outputPath}. Delete this file when you no longer need it.`;
-
-        return {
-          content: [{ type: "text", text: message }],
-          details: result.details,
-        };
-      }
-
+      const response = formatReadFullResult(result);
       return {
-        content: [{ type: "text", text: result.text }],
-        details: result.details,
+        content: [{ type: "text", text: response.content }],
+        details: response.details,
       };
     },
   });
@@ -230,6 +255,32 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
             details: {
               ...result.normalized,
             },
+          });
+        } catch (error) {
+          ctx.ui.notify(formatOllamaWebError(error), "error");
+        }
+      },
+    });
+
+    pi.registerCommand("ollama-read-full", {
+      description: "Run an Ollama read-full debug request. Enabled by PI_OLLAMA_SEARCH_DEV. Pass JSON args.",
+      handler: async (args, ctx) => {
+        try {
+          const params = parseReadFullDebugArgs(args);
+          const result = await runOllamaWebReadFull(
+            { ...params, cwd: ctx.cwd, signal: ctx.signal },
+            {
+              readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
+              readSearchContent: searchContentStore.readSearchContent,
+            },
+          );
+          const response = formatReadFullResult(result);
+
+          pi.sendMessage({
+            customType: "ollama-web-read-full-debug",
+            content: response.content,
+            display: true,
+            details: response.details,
           });
         } catch (error) {
           ctx.ui.notify(formatOllamaWebError(error), "error");

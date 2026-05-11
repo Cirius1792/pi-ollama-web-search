@@ -16,14 +16,26 @@ export interface SearchRetrievalResultMetadata {
 
 export interface SearchRetrievalMetadata {
   kind: "search";
+  replay: {
+    query: string;
+    maxResults: number;
+    originalResultUrls: string[];
+  };
   results: SearchRetrievalResultMetadata[];
 }
 
-export interface StoredSearchContent {
+export interface StoredSearchRetrievalBase {
   kind: "search";
   ref: string;
   query: string;
   maxResults: number;
+}
+
+export interface StoredSearchReplay extends StoredSearchRetrievalBase {
+  originalResultUrls: string[];
+}
+
+export interface StoredSearchContent extends StoredSearchRetrievalBase {
   payload: NormalizedSearchResponse;
 }
 
@@ -47,44 +59,50 @@ export interface ReadStoredSearchContentResult {
   };
 }
 
-interface ReplaySearchIdentity {
-  url: string;
-  occurrence: number;
-}
+export const SEARCH_CONTENT_STORE_MAX_BYTES = 1_000_000;
+export const SEARCH_CONTENT_STORE_MAX_ENTRIES = 256;
 
-interface StoredSearchReplayMetadata {
-  ref: string;
-  query: string;
-  maxResults: number;
-  resultIdentities: ReplaySearchIdentity[];
-}
-
-interface StoredCacheEntry {
-  value: StoredSearchContent;
+interface StoredSearchEntry {
+  replay: StoredSearchReplay;
+  payload?: NormalizedSearchResponse;
   retainedBytes: number;
 }
-
-const DEFAULT_SEARCH_CONTENT_CACHE_MAX_BYTES = 1_000_000;
 
 function createOpaqueRefToken(): string {
   return randomBytes(12).toString("base64url");
 }
 
-function buildSearchReplayIdentities(payload: NormalizedSearchResponse): ReplaySearchIdentity[] {
-  const seenByUrl = new Map<string, number>();
-
-  return payload.results.map((result) => {
-    const nextOccurrence = (seenByUrl.get(result.url) ?? 0) + 1;
-    seenByUrl.set(result.url, nextOccurrence);
-
-    return {
-      url: result.url,
-      occurrence: nextOccurrence,
-    };
-  });
+function buildStoredSearchReplay(input: {
+  ref: string;
+  query: string;
+  maxResults: number;
+  payload: NormalizedSearchResponse;
+  originalResultUrls?: string[];
+}): StoredSearchReplay {
+  return {
+    kind: "search",
+    ref: input.ref,
+    query: input.query,
+    maxResults: input.maxResults,
+    originalResultUrls: input.originalResultUrls ?? input.payload.results.map((result) => result.url),
+  };
 }
 
-function calculatePayloadRetainedBytes(payload: NormalizedSearchResponse): number {
+function toStoredSearchContent(entry: StoredSearchEntry): StoredSearchContent | undefined {
+  if (!entry.payload) {
+    return undefined;
+  }
+
+  return {
+    kind: "search",
+    ref: entry.replay.ref,
+    query: entry.replay.query,
+    maxResults: entry.replay.maxResults,
+    payload: entry.payload,
+  };
+}
+
+function getRetainedBytes(payload: NormalizedSearchResponse): number {
   return Buffer.byteLength(JSON.stringify(payload), "utf8");
 }
 
@@ -111,12 +129,11 @@ function sliceByOffsetAndMaxChars(value: string, offset: number, maxChars?: numb
 }
 
 function isAbortLikeError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const candidate = error as { name?: unknown; code?: unknown };
-  return candidate.name === "AbortError" || candidate.code === "ABORT_ERR";
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError") ||
+    (!!error && typeof error === "object" && (error as { code?: unknown }).code === "ABORT_ERR")
+  );
 }
 
 function getErrorReason(error: unknown): string {
@@ -131,55 +148,42 @@ function getErrorReason(error: unknown): string {
   return "Unknown replay error";
 }
 
-function replayIdentityKey(identity: ReplaySearchIdentity): string {
-  return `${identity.url}\u0000${String(identity.occurrence)}`;
-}
+function getOriginalSearchResultIdentity(originalResultUrls: string[], resultIndex: number): { url: string; occurrence: number } {
+  const targetUrl = originalResultUrls[resultIndex - 1];
+  let occurrence = 0;
 
-function buildReplayLookup(replayedPayload: NormalizedSearchResponse): Map<string, NormalizedSearchResult> {
-  const replayLookup = new Map<string, NormalizedSearchResult>();
-  const replayUrlOccurrences = new Map<string, number>();
-
-  for (const result of replayedPayload.results) {
-    const nextOccurrence = (replayUrlOccurrences.get(result.url) ?? 0) + 1;
-    replayUrlOccurrences.set(result.url, nextOccurrence);
-    replayLookup.set(replayIdentityKey({ url: result.url, occurrence: nextOccurrence }), result);
-  }
-
-  return replayLookup;
-}
-
-function findFirstMissingReplayIdentityIndex(
-  replayLookup: Map<string, NormalizedSearchResult>,
-  metadata: StoredSearchReplayMetadata,
-): number | undefined {
-  for (let index = 0; index < metadata.resultIdentities.length; index += 1) {
-    const identity = metadata.resultIdentities[index];
-    if (!replayLookup.has(replayIdentityKey(identity))) {
-      return index;
+  for (let index = 0; index < resultIndex; index += 1) {
+    if (originalResultUrls[index] === targetUrl) {
+      occurrence += 1;
     }
   }
-
-  return undefined;
-}
-
-function remapReplayPayloadByIdentity(
-  replayLookup: Map<string, NormalizedSearchResult>,
-  metadata: StoredSearchReplayMetadata,
-): NormalizedSearchResponse {
-  const remappedResults = metadata.resultIdentities.map((identity, index) => {
-    const replayedResult = replayLookup.get(replayIdentityKey(identity));
-    if (!replayedResult) {
-      throw new Error(
-        `Unable to reconstruct original result ${String(index + 1)} for URL ${identity.url} (occurrence ${String(identity.occurrence)}) during replay.`,
-      );
-    }
-
-    return replayedResult;
-  });
 
   return {
-    results: remappedResults,
+    url: targetUrl,
+    occurrence,
   };
+}
+
+function getMappedSearchResult(
+  payload: NormalizedSearchResponse,
+  originalResultUrls: string[],
+  resultIndex: number,
+): NormalizedSearchResult {
+  const { url, occurrence } = getOriginalSearchResultIdentity(originalResultUrls, resultIndex);
+  let matchedOccurrence = 0;
+
+  for (const result of payload.results) {
+    if (result.url !== url) {
+      continue;
+    }
+
+    matchedOccurrence += 1;
+    if (matchedOccurrence === occurrence) {
+      return result;
+    }
+  }
+
+  throw new Error(`Unable to reconstruct original result ${String(resultIndex)} for URL ${url} (occurrence ${String(occurrence)}) during replay.`);
 }
 
 export function createFullContentRef(_kind: "search"): string {
@@ -190,115 +194,141 @@ export function createSearchContentStore(options?: {
   maxRetainedBytes?: number;
   replaySearch?: (params: { query: string; maxResults: number; signal?: AbortSignal }) => Promise<NormalizedSearchResponse>;
 }) {
-  const maxRetainedBytes = options?.maxRetainedBytes ?? DEFAULT_SEARCH_CONTENT_CACHE_MAX_BYTES;
+  const maxRetainedBytes = options?.maxRetainedBytes ?? SEARCH_CONTENT_STORE_MAX_BYTES;
   const replaySearch = options?.replaySearch;
+  const contentStore = new Map<string, StoredSearchEntry>();
+  let totalRetainedBytes = 0;
 
   if (!Number.isFinite(maxRetainedBytes) || maxRetainedBytes <= 0) {
     throw new Error("maxRetainedBytes must be greater than 0.");
   }
 
-  const replayMetadataStore = new Map<string, StoredSearchReplayMetadata>();
-  const payloadCache = new Map<string, StoredCacheEntry>();
-  let retainedBytes = 0;
+  function touchEntry(ref: string, entry: StoredSearchEntry): void {
+    contentStore.delete(ref);
+    contentStore.set(ref, entry);
+  }
 
-  function removeCachedPayload(ref: string): void {
-    const existing = payloadCache.get(ref);
-    if (!existing) {
+  function evictPayload(entry: StoredSearchEntry): void {
+    if (!entry.payload || entry.retainedBytes === 0) {
       return;
     }
 
-    retainedBytes -= existing.retainedBytes;
-    payloadCache.delete(ref);
+    totalRetainedBytes = Math.max(0, totalRetainedBytes - entry.retainedBytes);
+    entry.payload = undefined;
+    entry.retainedBytes = 0;
   }
 
-  function touchCachedPayload(ref: string): StoredCacheEntry | undefined {
-    const existing = payloadCache.get(ref);
-    if (!existing) {
-      return undefined;
+  function evictOldestEntry(): void {
+    const oldestRef = contentStore.keys().next().value;
+    if (!oldestRef) {
+      return;
     }
 
-    payloadCache.delete(ref);
-    payloadCache.set(ref, existing);
+    const oldestEntry = contentStore.get(oldestRef);
+    if (oldestEntry) {
+      evictPayload(oldestEntry);
+    }
 
-    return existing;
+    contentStore.delete(oldestRef);
   }
 
-  function enforceCacheByteBudget(newestRef: string): void {
-    while (retainedBytes > maxRetainedBytes && payloadCache.size > 0) {
-      const oldestRef = payloadCache.keys().next().value as string | undefined;
-      if (!oldestRef) {
-        return;
+  function enforceStoreLimits(newestRef: string): void {
+    while (contentStore.size > SEARCH_CONTENT_STORE_MAX_ENTRIES) {
+      evictOldestEntry();
+    }
+
+    if (totalRetainedBytes <= maxRetainedBytes) {
+      return;
+    }
+
+    for (const [ref, entry] of contentStore) {
+      if (ref === newestRef) {
+        continue;
       }
 
-      if (payloadCache.size === 1 && oldestRef === newestRef) {
+      evictPayload(entry);
+      if (totalRetainedBytes <= maxRetainedBytes) {
         return;
       }
-
-      removeCachedPayload(oldestRef);
     }
   }
 
-  function cachePayload(input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }): void {
-    removeCachedPayload(input.ref);
+  function rememberSearchContent(input: {
+    ref: string;
+    query: string;
+    maxResults: number;
+    payload: NormalizedSearchResponse;
+    originalResultUrls?: string[];
+  }): void {
+    const replay = buildStoredSearchReplay(input);
+    const retainedBytes = getRetainedBytes(input.payload);
+    const existingEntry = contentStore.get(input.ref);
 
-    const value: StoredSearchContent = {
-      kind: "search",
-      ref: input.ref,
-      query: input.query,
-      maxResults: input.maxResults,
+    if (existingEntry) {
+      evictPayload(existingEntry);
+    }
+
+    const entry: StoredSearchEntry = {
+      replay,
       payload: input.payload,
+      retainedBytes,
     };
 
-    const cachedEntry: StoredCacheEntry = {
-      value,
-      retainedBytes: calculatePayloadRetainedBytes(input.payload),
-    };
-
-    payloadCache.set(input.ref, cachedEntry);
-    retainedBytes += cachedEntry.retainedBytes;
-
-    enforceCacheByteBudget(input.ref);
-  }
-
-  function rememberSearchContent(input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }): void {
-    replayMetadataStore.set(input.ref, {
-      ref: input.ref,
-      query: input.query,
-      maxResults: input.maxResults,
-      resultIdentities: buildSearchReplayIdentities(input.payload),
-    });
-
-    cachePayload(input);
+    totalRetainedBytes += retainedBytes;
+    touchEntry(input.ref, entry);
+    enforceStoreLimits(input.ref);
   }
 
   function getStoredSearchContent(ref: string): StoredSearchContent | undefined {
-    return touchCachedPayload(ref)?.value;
+    const entry = contentStore.get(ref);
+    if (!entry?.payload) {
+      return undefined;
+    }
+
+    touchEntry(ref, entry);
+    return toStoredSearchContent(entry);
+  }
+
+  function getStoredSearchReplay(ref: string): StoredSearchReplay | undefined {
+    const entry = contentStore.get(ref);
+    if (!entry) {
+      return undefined;
+    }
+
+    touchEntry(ref, entry);
+    return entry.replay;
   }
 
   async function readSearchContent(input: ReadStoredSearchContentParams): Promise<ReadStoredSearchContentResult> {
     validateInlineIntegerInput("Offset", input.offset, 0);
     validateInlineIntegerInput("maxChars", input.maxChars, 1);
 
-    const metadata = replayMetadataStore.get(input.ref);
-    if (!metadata) {
+    const entry = contentStore.get(input.ref);
+    if (!entry) {
       throw new Error(`No stored content found for ref ${input.ref}.`);
     }
 
-    if (!Number.isInteger(input.resultIndex) || input.resultIndex < 1 || input.resultIndex > metadata.resultIdentities.length) {
+    if (
+      !Number.isInteger(input.resultIndex) ||
+      input.resultIndex < 1 ||
+      input.resultIndex > entry.replay.originalResultUrls.length
+    ) {
       throw new Error(
-        `Search result index ${String(input.resultIndex)} is out of range. Valid range is 1-${metadata.resultIdentities.length}.`,
+        `Search result index ${String(input.resultIndex)} is out of range. Valid range is 1-${entry.replay.originalResultUrls.length}.`,
       );
     }
 
     input.signal?.throwIfAborted();
 
-    const cached = touchCachedPayload(input.ref)?.value;
-    if (cached) {
-      const selected = cached.payload.results[input.resultIndex - 1];
-      if (!selected) {
-        throw new Error(
-          `Stored payload for ref ${input.ref} is missing result ${String(input.resultIndex)}. Clear refs and rerun search.`,
-        );
+    if (entry.payload) {
+      touchEntry(input.ref, entry);
+
+      let selected: NormalizedSearchResult;
+      try {
+        selected = getMappedSearchResult(entry.payload, entry.replay.originalResultUrls, input.resultIndex);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`No stored content found for ref ${input.ref}. ${message}`);
       }
 
       return {
@@ -320,37 +350,26 @@ export function createSearchContentStore(options?: {
         throw new Error("Search replay is not configured.");
       }
 
-      const replayedPayload = await replaySearch({
-        query: metadata.query,
-        maxResults: metadata.maxResults,
+      const replayed = await replaySearch({
+        query: entry.replay.query,
+        maxResults: entry.replay.maxResults,
         signal: input.signal,
       });
 
       input.signal?.throwIfAborted();
 
-      const targetIdentity = metadata.resultIdentities[input.resultIndex - 1];
-      const replayLookup = buildReplayLookup(replayedPayload);
-      const remappedResult = replayLookup.get(replayIdentityKey(targetIdentity));
+      const selected = getMappedSearchResult(replayed, entry.replay.originalResultUrls, input.resultIndex);
 
-      if (!remappedResult) {
-        throw new Error(
-          `Unable to reconstruct original result ${String(input.resultIndex)} for URL ${targetIdentity.url} (occurrence ${String(targetIdentity.occurrence)}) during replay.`,
-        );
-      }
-
-      const missingReplayIndex = findFirstMissingReplayIdentityIndex(replayLookup, metadata);
-      if (missingReplayIndex === undefined) {
-        const remappedPayload = remapReplayPayloadByIdentity(replayLookup, metadata);
-        cachePayload({
-          ref: metadata.ref,
-          query: metadata.query,
-          maxResults: metadata.maxResults,
-          payload: remappedPayload,
-        });
-      }
+      rememberSearchContent({
+        ref: entry.replay.ref,
+        query: entry.replay.query,
+        maxResults: entry.replay.maxResults,
+        payload: replayed,
+        originalResultUrls: entry.replay.originalResultUrls,
+      });
 
       return {
-        text: sliceByOffsetAndMaxChars(getSearchSectionText(remappedResult, input.section), input.offset ?? 0, input.maxChars),
+        text: sliceByOffsetAndMaxChars(getSearchSectionText(selected, input.section), input.offset ?? 0, input.maxChars),
         details: {
           ref: input.ref,
           kind: "search",
@@ -371,28 +390,40 @@ export function createSearchContentStore(options?: {
   }
 
   function clearCachedSearchPayloads(): void {
-    payloadCache.clear();
-    retainedBytes = 0;
+    for (const entry of contentStore.values()) {
+      evictPayload(entry);
+    }
+    totalRetainedBytes = 0;
   }
 
   function clearSearchContentStore(): void {
-    replayMetadataStore.clear();
-    clearCachedSearchPayloads();
+    contentStore.clear();
+    totalRetainedBytes = 0;
   }
 
   return {
     rememberSearchContent,
     getStoredSearchContent,
+    getStoredSearchReplay,
     readSearchContent,
     clearCachedSearchPayloads,
     clearSearchContentStore,
   };
 }
 
-export function buildSearchRetrievalMetadata(payload: NormalizedSearchResponse): SearchRetrievalMetadata {
+export function buildSearchRetrievalMetadata(input: {
+  payload: NormalizedSearchResponse;
+  query: string;
+  maxResults: number;
+}): SearchRetrievalMetadata {
   return {
     kind: "search",
-    results: payload.results.map((result, index) => ({
+    replay: {
+      query: input.query,
+      maxResults: input.maxResults,
+      originalResultUrls: input.payload.results.map((result) => result.url),
+    },
+    results: input.payload.results.map((result, index) => ({
       resultIndex: index + 1,
       sections: {
         title: { totalChars: result.title.length },

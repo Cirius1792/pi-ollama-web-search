@@ -8,7 +8,13 @@ export interface RunOllamaWebSearchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-  rememberSearchContent?: (input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }) => void;
+  rememberSearchContent?: (input: {
+    ref: string;
+    query: string;
+    maxResults: number;
+    payload: NormalizedSearchResponse;
+    originalResultUrls?: string[];
+  }) => void;
 }
 
 export interface SearchResultDetails {
@@ -73,7 +79,11 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
     payload: normalized,
   });
 
-  const retrieval = buildSearchRetrievalMetadata(normalized);
+  const retrieval = buildSearchRetrievalMetadata({
+    payload: normalized,
+    query: trimmedQuery,
+    maxResults: options.config.maxResults,
+  });
   let truncated = false;
   const formattedResult = formatSearchResultsWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,
