@@ -275,6 +275,7 @@ export function createFetchRetrievalStore(options?: {
         signal,
       });
 
+      signal?.throwIfAborted();
       cacheFetchPayload(ref, replayedPayload);
 
       return {

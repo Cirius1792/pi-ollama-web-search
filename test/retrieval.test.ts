@@ -355,6 +355,67 @@ describe("readFullFetchContent replay recovery", () => {
     expect(replayFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("rethrows AbortError unchanged when abort fires during replay before cache write", async () => {
+    const abortError = new Error("The operation was aborted.");
+    abortError.name = "AbortError";
+
+    const controller = new AbortController();
+    const replayFetch = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await Promise.resolve();
+        controller.abort(abortError);
+        return {
+          title: "Replayed title",
+          content: "Replayed content",
+          links: ["https://example.com/replayed"],
+        };
+      })
+      .mockResolvedValueOnce({
+        title: "Replayed title",
+        content: "Replayed content",
+        links: ["https://example.com/replayed"],
+      });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(abortError);
+
+    const replayedAfterAbort = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayedAfterAbort.mode).toBe("inline");
+    if (replayedAfterAbort.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(replayedAfterAbort.text).toBe("Replayed content");
+    expect(replayedAfterAbort.details.servedFrom).toBe("replay");
+    expect(replayFetch).toHaveBeenCalledTimes(2);
+  });
+
   it("returns combined cache-miss envelope when replay also fails", async () => {
     const replayFetch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
     const store = createFetchRetrievalStore({ replayFetch });
