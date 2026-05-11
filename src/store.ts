@@ -290,6 +290,8 @@ export function createSearchContentStore(options?: {
       );
     }
 
+    input.signal?.throwIfAborted();
+
     const cached = touchCachedPayload(input.ref)?.value;
     if (cached) {
       const selected = cached.payload.results[input.resultIndex - 1];
@@ -312,6 +314,8 @@ export function createSearchContentStore(options?: {
     }
 
     try {
+      input.signal?.throwIfAborted();
+
       if (!replaySearch) {
         throw new Error("Search replay is not configured.");
       }
@@ -321,6 +325,8 @@ export function createSearchContentStore(options?: {
         maxResults: metadata.maxResults,
         signal: input.signal,
       });
+
+      input.signal?.throwIfAborted();
 
       const targetIdentity = metadata.resultIdentities[input.resultIndex - 1];
       const replayLookup = buildReplayLookup(replayedPayload);

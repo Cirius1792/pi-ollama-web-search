@@ -127,6 +127,60 @@ describe("search content store", () => {
     );
   });
 
+  it("throws AbortError before serving cached search content when signal is already aborted", async () => {
+    const replaySearch = vi.fn();
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
+    const ref = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref,
+      query: "cached abort",
+      maxResults: 1,
+      payload: createPayload("cached-abort"),
+    });
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      store.readSearchContent({ ref, resultIndex: 1, section: "content", signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(replaySearch).not.toHaveBeenCalled();
+  });
+
+  it("throws AbortError before replay when signal is already aborted", async () => {
+    const replaySearch = vi.fn().mockResolvedValue({
+      results: [
+        {
+          title: "replayed title",
+          url: "https://example.com/replayed",
+          content: "replayed content",
+        },
+      ],
+    });
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
+    const ref = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref,
+      query: "replay abort",
+      maxResults: 1,
+      payload: createPayload("replay-abort"),
+    });
+
+    store.clearCachedSearchPayloads();
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      store.readSearchContent({ ref, resultIndex: 1, section: "content", signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(replaySearch).not.toHaveBeenCalled();
+  });
+
   it("rethrows replay AbortError unchanged", async () => {
     const abortError = new Error("The operation was aborted.");
     abortError.name = "AbortError";
