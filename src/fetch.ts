@@ -2,13 +2,17 @@ import { fetchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, type OllamaSearchConfig } from "./config.js";
 import { formatFetchResultWithMetadata, type FetchTruncationMetadata } from "./format.js";
 import { normalizeWebFetchResponse, type NormalizedFetchResponse } from "./normalize.js";
-import { registerFetchRetrieval as registerFetchRetrievalDefault, type FetchRetrievalRecord } from "./retrieval.js";
+import {
+  registerFetchRetrieval as registerFetchRetrievalDefault,
+  type FetchRetrievalRecord,
+  type RegisterFetchRetrievalOptions,
+} from "./retrieval.js";
 
 export interface RunOllamaWebFetchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-  registerFetchRetrieval?: (payload: NormalizedFetchResponse) => FetchRetrievalRecord;
+  registerFetchRetrieval?: (payload: NormalizedFetchResponse, options?: RegisterFetchRetrievalOptions) => FetchRetrievalRecord;
 }
 
 export interface FetchResultDetails extends FetchRetrievalRecord {
@@ -41,7 +45,8 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
   });
 
   const registerFetchRetrieval = options.registerFetchRetrieval ?? registerFetchRetrievalDefault;
-  const normalized = registerFetchRetrieval(normalizeWebFetchResponse(raw));
+  const normalizedPayload = normalizeWebFetchResponse(raw);
+  const normalized = registerFetchRetrieval(normalizedPayload, { sourceUrl: trimmedUrl });
   const formattedResult = formatFetchResultWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,
     fullContentRef: normalized.fullContentRef,

@@ -301,6 +301,316 @@ describe("readFullFetchContent file exports", () => {
   });
 });
 
+describe("readFullFetchContent replay recovery", () => {
+  it("replays payload on cache miss and returns servedFrom replay with same ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    const result = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(result.mode).toBe("inline");
+    if (result.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(result.text).toBe("Replayed content");
+    expect(result.details.fullContentRef).toBe(replayable.fullContentRef);
+    expect(result.details.servedFrom).toBe("replay");
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/source", signal: undefined });
+
+    const cached = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(cached.mode).toBe("inline");
+    if (cached.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(cached.text).toBe("Replayed content");
+    expect(cached.details.servedFrom).toBe("cache");
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows AbortError unchanged when abort fires during replay before cache write", async () => {
+    const abortError = new Error("The operation was aborted.");
+    abortError.name = "AbortError";
+
+    const controller = new AbortController();
+    const replayFetch = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await Promise.resolve();
+        controller.abort(abortError);
+        return {
+          title: "Replayed title",
+          content: "Replayed content",
+          links: ["https://example.com/replayed"],
+        };
+      })
+      .mockResolvedValueOnce({
+        title: "Replayed title",
+        content: "Replayed content",
+        links: ["https://example.com/replayed"],
+      });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(abortError);
+
+    const replayedAfterAbort = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayedAfterAbort.mode).toBe("inline");
+    if (replayedAfterAbort.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(replayedAfterAbort.text).toBe("Replayed content");
+    expect(replayedAfterAbort.details.servedFrom).toBe("replay");
+    expect(replayFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns combined cache-miss envelope when replay also fails", async () => {
+    const replayFetch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(
+      `No stored full content found for ref: ${replayable.fullContentRef}. Replay also failed: upstream unavailable`,
+    );
+  });
+
+  it("validates inline offset and maxChars before replaying an evicted ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        offset: -1,
+      }),
+    ).rejects.toThrow("offset must be a non-negative integer.");
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        maxChars: 0,
+      }),
+    ).rejects.toThrow("maxChars must be a positive integer.");
+
+    expect(replayFetch).not.toHaveBeenCalled();
+  });
+
+  it("validates explicit file output preconditions before replaying an evicted ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    accessMock.mockResolvedValueOnce();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        mode: "file",
+        outputPath: "/workspace/project/export.txt",
+        overwrite: false,
+      }),
+    ).rejects.toThrow("File already exists: /workspace/project/export.txt. Pass overwrite=true to replace it.");
+
+    expect(replayFetch).not.toHaveBeenCalled();
+    expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it("trims sourceUrl before storing replay metadata", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "  https://example.com/source  " },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/source", signal: undefined });
+  });
+
+  it("rebuilds payload for file mode reads after replay", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    const fileResult = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+      mode: "file",
+      outputPath: "/workspace/project/replayed.txt",
+    });
+
+    expect(fileResult.mode).toBe("file");
+    if (fileResult.mode !== "file") {
+      throw new Error("Expected file mode result");
+    }
+
+    expect(fileResult.details.fullContentRef).toBe(replayable.fullContentRef);
+    expect(fileResult.details.servedFrom).toBe("replay");
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/workspace/project/replayed.txt",
+      "Replayed content",
+      expect.objectContaining({ encoding: "utf8", flag: "wx" }),
+    );
+
+    const cachedInline = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(cachedInline.mode).toBe("inline");
+    if (cachedInline.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(cachedInline.details.servedFrom).toBe("cache");
+    expect(cachedInline.text).toBe("Replayed content");
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("registerFetchRetrieval store retention", () => {
   it("issues unique refs for identical payloads", async () => {
     const payload = {

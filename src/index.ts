@@ -1,7 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { fetchOllamaWeb, searchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
 import { runOllamaWebFetch } from "./fetch.js";
+import { normalizeWebFetchResponse, normalizeWebSearchResponse } from "./normalize.js";
 import { runOllamaWebReadFull } from "./read-full.js";
 import { createFetchRetrievalStore } from "./retrieval.js";
 import { formatOllamaWebError, runOllamaWebSearch } from "./search.js";
@@ -52,8 +54,39 @@ const ReadFullParams = Type.Object({
 
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
-  const fetchRetrievalStore = createFetchRetrievalStore();
-  const searchContentStore = createSearchContentStore();
+  const fetchRetrievalStore = createFetchRetrievalStore({
+    replayFetch: async ({ url, signal }) => {
+      if (!config.apiKey) {
+        throw new Error(getMissingApiKeyMessage());
+      }
+
+      const replayRaw = await fetchOllamaWeb({
+        endpoint: config.fetchEndpoint,
+        apiKey: config.apiKey,
+        url,
+        signal,
+      });
+
+      return normalizeWebFetchResponse(replayRaw);
+    },
+  });
+  const searchContentStore = createSearchContentStore({
+    replaySearch: async ({ query, maxResults, signal }) => {
+      if (!config.apiKey) {
+        throw new Error(getMissingApiKeyMessage());
+      }
+
+      const replayRaw = await searchOllamaWeb({
+        endpoint: config.searchEndpoint,
+        apiKey: config.apiKey,
+        query,
+        maxResults,
+        signal,
+      });
+
+      return normalizeWebSearchResponse(replayRaw);
+    },
+  });
 
   pi.registerTool({
     name: "ollama_web_search",
@@ -132,7 +165,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         { ...params, cwd: ctx?.cwd, signal },
         {
           readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
-          getStoredSearchContent: searchContentStore.getStoredSearchContent,
+          readSearchContent: searchContentStore.readSearchContent,
         },
       );
 

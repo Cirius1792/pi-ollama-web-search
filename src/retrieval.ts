@@ -29,6 +29,10 @@ export interface FetchRetrievalRecord extends NormalizedFetchResponse {
   retrieval: FetchRetrievalMetadata;
 }
 
+export interface RegisterFetchRetrievalOptions {
+  sourceUrl?: string;
+}
+
 export interface ReadFullFetchParams {
   fullContentRef: string;
   section: FetchRetrievalSection;
@@ -49,6 +53,7 @@ export interface ReadFullInlineResult {
     target: "fetch";
     section: FetchRetrievalSection;
     fullContentRef: string;
+    servedFrom: "cache" | "replay";
     offset: number;
     maxChars?: number;
     totalChars: number;
@@ -63,6 +68,7 @@ export interface ReadFullFileResult {
     target: "fetch";
     section: FetchRetrievalSection;
     fullContentRef: string;
+    servedFrom: "cache" | "replay";
     outputPath: string;
     charsWritten: number;
     temporary: boolean;
@@ -82,8 +88,13 @@ interface StoredFetchPayload {
   retainedBytes: number;
 }
 
+interface StoredFetchReplayMetadata {
+  sourceUrl?: string;
+}
+
 export interface FetchRetrievalStore {
-  registerFetchRetrieval(payload: NormalizedFetchResponse): FetchRetrievalRecord;
+  registerFetchRetrieval(payload: NormalizedFetchResponse, options?: RegisterFetchRetrievalOptions): FetchRetrievalRecord;
+  clearCachedFetchPayloads(): void;
   clearFetchRetrievalStore(): void;
   cleanupTemporaryExports(): Promise<void>;
   readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult>;
@@ -151,33 +162,70 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-export function createFetchRetrievalStore(): FetchRetrievalStore {
-  const fetchRetrievalStore = new Map<string, StoredFetchPayload>();
-  let fetchRetrievalStoreBytes = 0;
+function isAbortLikeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { name?: unknown; code?: unknown };
+  return candidate.name === "AbortError" || candidate.code === "ABORT_ERR";
+}
+
+function getErrorReason(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "Unknown replay error";
+}
+
+export function createFetchRetrievalStore(options?: {
+  replayFetch?: (params: { url: string; signal?: AbortSignal }) => Promise<NormalizedFetchResponse>;
+}): FetchRetrievalStore {
+  const fetchReplayMetadata = new Map<string, StoredFetchReplayMetadata>();
+  const fetchPayloadCache = new Map<string, StoredFetchPayload>();
+  let fetchPayloadCacheBytes = 0;
   const temporaryExportRoot = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}`);
   let hasTemporaryExports = false;
 
   function evictOldestFetchRecord(): void {
-    const oldestRef = fetchRetrievalStore.keys().next().value;
+    const oldestRef = fetchPayloadCache.keys().next().value;
     if (!oldestRef) return;
 
-    const removed = fetchRetrievalStore.get(oldestRef);
+    const removed = fetchPayloadCache.get(oldestRef);
     if (removed) {
-      fetchRetrievalStoreBytes = Math.max(0, fetchRetrievalStoreBytes - removed.retainedBytes);
+      fetchPayloadCacheBytes = Math.max(0, fetchPayloadCacheBytes - removed.retainedBytes);
     }
-    fetchRetrievalStore.delete(oldestRef);
+    fetchPayloadCache.delete(oldestRef);
   }
 
   function enforceFetchStoreLimit(retainRef?: string): void {
     while (
-      fetchRetrievalStore.size > FETCH_RETRIEVAL_STORE_MAX_ENTRIES ||
-      (fetchRetrievalStoreBytes > FETCH_RETRIEVAL_STORE_MAX_BYTES && (!retainRef || fetchRetrievalStore.size > 1))
+      fetchPayloadCache.size > FETCH_RETRIEVAL_STORE_MAX_ENTRIES ||
+      (fetchPayloadCacheBytes > FETCH_RETRIEVAL_STORE_MAX_BYTES && (!retainRef || fetchPayloadCache.size > 1))
     ) {
       evictOldestFetchRecord();
     }
   }
 
-  function requireRefPayload(fullContentRef: string): NormalizedFetchResponse {
+  function cacheFetchPayload(fullContentRef: string, payload: NormalizedFetchResponse): void {
+    const existing = fetchPayloadCache.get(fullContentRef);
+    if (existing) {
+      fetchPayloadCacheBytes = Math.max(0, fetchPayloadCacheBytes - existing.retainedBytes);
+      fetchPayloadCache.delete(fullContentRef);
+    }
+
+    const retainedBytes = measureRetainedBytes(payload);
+    fetchPayloadCache.set(fullContentRef, { payload, retainedBytes });
+    fetchPayloadCacheBytes += retainedBytes;
+    enforceFetchStoreLimit(fullContentRef);
+  }
+
+  function requireRefMetadata(fullContentRef: string): { ref: string; metadata: StoredFetchReplayMetadata } {
     const trimmedRef = fullContentRef.trim();
     if (!trimmedRef) {
       throw new Error("fullContentRef must not be empty.");
@@ -187,24 +235,77 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       throw new Error("fullContentRef must reference a fetch result.");
     }
 
-    const stored = fetchRetrievalStore.get(trimmedRef);
-    if (!stored) {
+    const metadata = fetchReplayMetadata.get(trimmedRef);
+    if (!metadata) {
       throw new Error(`No stored full content found for ref: ${trimmedRef}`);
     }
 
-    return stored.payload;
+    return { ref: trimmedRef, metadata };
   }
 
-  function registerFetchRetrieval(payload: NormalizedFetchResponse): FetchRetrievalRecord {
+  async function getPayloadForRead(
+    fullContentRef: string,
+    signal?: AbortSignal,
+  ): Promise<{ payload: NormalizedFetchResponse; servedFrom: "cache" | "replay" }> {
+    const { ref, metadata } = requireRefMetadata(fullContentRef);
+
+    const cached = fetchPayloadCache.get(ref);
+    if (cached) {
+      fetchPayloadCache.delete(ref);
+      fetchPayloadCache.set(ref, cached);
+      return {
+        payload: cached.payload,
+        servedFrom: "cache",
+      };
+    }
+
+    try {
+      signal?.throwIfAborted();
+
+      if (!metadata.sourceUrl?.trim()) {
+        throw new Error(`Replay metadata for ref ${ref} is missing source URL.`);
+      }
+
+      if (!options?.replayFetch) {
+        throw new Error("fetch replay is not configured.");
+      }
+
+      const replayedPayload = await options.replayFetch({
+        url: metadata.sourceUrl,
+        signal,
+      });
+
+      signal?.throwIfAborted();
+      cacheFetchPayload(ref, replayedPayload);
+
+      return {
+        payload: replayedPayload,
+        servedFrom: "replay",
+      };
+    } catch (error) {
+      if (isAbortLikeError(error)) {
+        throw error;
+      }
+
+      throw new Error(`No stored full content found for ref: ${ref}. Replay also failed: ${getErrorReason(error)}`, {
+        cause: error,
+      });
+    }
+  }
+
+  function registerFetchRetrieval(payload: NormalizedFetchResponse, registerOptions?: RegisterFetchRetrievalOptions): FetchRetrievalRecord {
     let fullContentRef = createOpaqueFetchRef();
-    while (fetchRetrievalStore.has(fullContentRef)) {
+    while (fetchReplayMetadata.has(fullContentRef)) {
       fullContentRef = createOpaqueFetchRef();
     }
 
-    const retainedBytes = measureRetainedBytes(payload);
-    fetchRetrievalStore.set(fullContentRef, { payload, retainedBytes });
-    fetchRetrievalStoreBytes += retainedBytes;
-    enforceFetchStoreLimit(fullContentRef);
+    const sourceUrl = registerOptions?.sourceUrl?.trim();
+
+    fetchReplayMetadata.set(fullContentRef, {
+      sourceUrl: sourceUrl ? sourceUrl : undefined,
+    });
+
+    cacheFetchPayload(fullContentRef, payload);
 
     return {
       ...payload,
@@ -221,9 +322,14 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
     };
   }
 
+  function clearCachedFetchPayloads(): void {
+    fetchPayloadCache.clear();
+    fetchPayloadCacheBytes = 0;
+  }
+
   function clearFetchRetrievalStore(): void {
-    fetchRetrievalStore.clear();
-    fetchRetrievalStoreBytes = 0;
+    fetchReplayMetadata.clear();
+    clearCachedFetchPayloads();
   }
 
   async function cleanupTemporaryExports(): Promise<void> {
@@ -238,36 +344,57 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
   async function readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult> {
     params.signal?.throwIfAborted();
 
-    const payload = requireRefPayload(params.fullContentRef);
-    const sectionText = getSectionText(payload, params.section);
     const mode = params.mode ?? "inline";
+    const offset = params.offset ?? 0;
 
-    if (mode === "file") {
-      const hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
-      const outputPath = hasExplicitOutputPath
+    let hasExplicitOutputPath = false;
+    let outputPath: string | undefined;
+
+    if (mode === "inline") {
+      validateNonNegativeInteger("offset", offset);
+
+      if (params.maxChars !== undefined) {
+        validatePositiveInteger("maxChars", params.maxChars);
+      }
+    } else {
+      hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
+      outputPath = hasExplicitOutputPath
         ? resolveOutputPath(params.outputPath!.trim(), params.cwd ?? process.cwd())
         : join(temporaryExportRoot, `${randomBytes(12).toString("hex")}-${params.section}.txt`);
 
+      if (hasExplicitOutputPath && !params.overwrite) {
+        const exists = await pathExists(outputPath);
+        if (exists) {
+          throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
+        }
+      }
+    }
+
+    const { payload, servedFrom } = await getPayloadForRead(params.fullContentRef, params.signal);
+    const sectionText = getSectionText(payload, params.section);
+
+    if (mode === "file") {
+      const resolvedOutputPath = outputPath!;
       let overwritten = false;
 
       if (!hasExplicitOutputPath) {
         hasTemporaryExports = true;
       }
 
-      await withFileMutationQueue(outputPath, async () => {
+      await withFileMutationQueue(resolvedOutputPath, async () => {
         params.signal?.throwIfAborted();
 
         if (hasExplicitOutputPath) {
-          const exists = await pathExists(outputPath);
+          const exists = await pathExists(resolvedOutputPath);
           if (exists && !params.overwrite) {
-            throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
+            throw new Error(`File already exists: ${resolvedOutputPath}. Pass overwrite=true to replace it.`);
           }
           overwritten = exists && params.overwrite === true;
         }
 
-        await mkdir(dirname(outputPath), { recursive: true });
+        await mkdir(dirname(resolvedOutputPath), { recursive: true });
         params.signal?.throwIfAborted();
-        await writeFile(outputPath, sectionText, {
+        await writeFile(resolvedOutputPath, sectionText, {
           encoding: "utf8",
           flag: hasExplicitOutputPath ? (params.overwrite ? "w" : "wx") : "w",
           signal: params.signal,
@@ -281,19 +408,13 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
           target: "fetch",
           section: params.section,
           fullContentRef: params.fullContentRef,
-          outputPath,
+          servedFrom,
+          outputPath: resolvedOutputPath,
           charsWritten: sectionText.length,
           temporary: !hasExplicitOutputPath,
           overwritten,
         },
       };
-    }
-
-    const offset = params.offset ?? 0;
-    validateNonNegativeInteger("offset", offset);
-
-    if (params.maxChars !== undefined) {
-      validatePositiveInteger("maxChars", params.maxChars);
     }
 
     const slicedText = params.maxChars === undefined ? sectionText.slice(offset) : sectionText.slice(offset, offset + params.maxChars);
@@ -306,6 +427,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
         target: "fetch",
         section: params.section,
         fullContentRef: params.fullContentRef,
+        servedFrom,
         offset,
         maxChars: params.maxChars,
         totalChars: sectionText.length,
@@ -316,6 +438,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
 
   return {
     registerFetchRetrieval,
+    clearCachedFetchPayloads,
     clearFetchRetrievalStore,
     cleanupTemporaryExports,
     readFullFetchContent,
@@ -325,6 +448,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
 const defaultFetchRetrievalStore = createFetchRetrievalStore();
 
 export const registerFetchRetrieval = defaultFetchRetrievalStore.registerFetchRetrieval;
+export const clearCachedFetchPayloads = defaultFetchRetrievalStore.clearCachedFetchPayloads;
 export const clearFetchRetrievalStore = defaultFetchRetrievalStore.clearFetchRetrievalStore;
 export const cleanupTemporaryExports = defaultFetchRetrievalStore.cleanupTemporaryExports;
 export const readFullFetchContent = defaultFetchRetrievalStore.readFullFetchContent;

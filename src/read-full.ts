@@ -1,5 +1,5 @@
 import { FETCH_RETRIEVAL_SECTIONS, type ReadFullFetchResult, type ReadFullFetchParams } from "./retrieval.js";
-import type { StoredSearchContent } from "./store.js";
+import type { ReadStoredSearchContentParams, ReadStoredSearchContentResult } from "./store.js";
 
 export type ReadFullSearchSection = "title" | "url" | "content";
 export type ReadFullFetchSection = (typeof FETCH_RETRIEVAL_SECTIONS)[number];
@@ -42,7 +42,7 @@ export interface RunOllamaWebReadFullInlineResult {
         kind: "search";
         section: ReadFullSearchSection;
         resultIndex: number;
-        servedFrom: "cache";
+        servedFrom: "cache" | "replay";
       }
     | FetchInlineDetails;
 }
@@ -53,13 +53,6 @@ export interface RunOllamaWebReadFullFileResult {
 }
 
 export type RunOllamaWebReadFullResult = RunOllamaWebReadFullInlineResult | RunOllamaWebReadFullFileResult;
-
-function sliceByOffsetAndMaxChars(value: string, offset: number, maxChars?: number): string {
-  if (maxChars === undefined) {
-    return value.slice(offset);
-  }
-  return value.slice(offset, offset + maxChars);
-}
 
 function getRefValue(input: RunOllamaWebReadFullInput): string {
   const ref = (input.ref ?? input.fullContentRef)?.trim();
@@ -91,7 +84,7 @@ export async function runOllamaWebReadFull(
   input: RunOllamaWebReadFullInput,
   options: {
     readFullFetchContent: (params: ReadFullFetchParams) => Promise<ReadFullFetchResult>;
-    getStoredSearchContent: (ref: string) => StoredSearchContent | undefined;
+    readSearchContent: (params: ReadStoredSearchContentParams) => Promise<ReadStoredSearchContentResult>;
   },
 ): Promise<RunOllamaWebReadFullResult> {
   const ref = getRefValue(input);
@@ -154,37 +147,22 @@ export async function runOllamaWebReadFull(
     throw new Error("section must be one of: title, url, content.");
   }
 
-  const stored = options.getStoredSearchContent(ref);
-  if (!stored) {
-    throw new Error(`No stored content found for ref ${ref}.`);
+  if (input.resultIndex === undefined) {
+    throw new Error("resultIndex is required for search refs.");
   }
 
-  if (stored.kind === "search") {
-    if (input.resultIndex === undefined) {
-      throw new Error("resultIndex is required for search refs.");
-    }
+  const searchResult = await options.readSearchContent({
+    ref,
+    resultIndex: input.resultIndex,
+    section,
+    offset: input.offset,
+    maxChars: input.maxChars,
+    signal: input.signal,
+  });
 
-    if (!Number.isInteger(input.resultIndex) || input.resultIndex < 1 || input.resultIndex > stored.payload.results.length) {
-      throw new Error(
-        `Search result index ${String(input.resultIndex)} is out of range. Valid range is 1-${stored.payload.results.length}.`,
-      );
-    }
-
-    const selected = stored.payload.results[input.resultIndex - 1];
-    const text = section === "title" ? selected.title : section === "url" ? selected.url : selected.content;
-
-    return {
-      mode: "inline",
-      text: sliceByOffsetAndMaxChars(text, input.offset ?? 0, input.maxChars),
-      details: {
-        ref,
-        kind: "search",
-        section,
-        resultIndex: input.resultIndex,
-        servedFrom: "cache",
-      },
-    };
-  }
-
-  throw new Error("Fetch refs are not supported by this retrieval instance.");
+  return {
+    mode: "inline",
+    text: searchResult.text,
+    details: searchResult.details,
+  };
 }

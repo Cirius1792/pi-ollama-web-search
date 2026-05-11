@@ -35,6 +35,13 @@ function createFakePi() {
   };
 }
 
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 const originalEnv = process.env;
 
 beforeEach(() => {
@@ -360,6 +367,205 @@ describe("extension", () => {
     await expect(
       readFullTool!.execute("tool-bad-ref", { ref: "ws_s_missing", section: "content", resultIndex: 1 }, undefined),
     ).rejects.toThrow("No stored content found for ref ws_s_missing.");
+  });
+
+  it("replays evicted search refs and preserves the same ref", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const queryCallCounts = new Map<string, number>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+        const query = payload.query;
+        const nextCount = (queryCallCounts.get(query ?? "") ?? 0) + 1;
+        queryCallCounts.set(query ?? "", nextCount);
+
+        if (query === "replay query") {
+          if (nextCount === 1) {
+            return jsonResponse({
+              results: [{ title: "Original", url: "https://example.com/a", content: "Original content" }],
+            });
+          }
+
+          return jsonResponse({
+            results: [{ title: "Replayed", url: "https://example.com/a", content: "Replayed content" }],
+          });
+        }
+
+        if (query === "evict query") {
+          return jsonResponse({
+            results: [{ title: "Huge", url: "https://example.com/huge", content: "x".repeat(1_200_000) }],
+          });
+        }
+
+        throw new Error(`Unexpected search query in test: ${String(query)}`);
+      }),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const firstSearch = await searchTool!.execute("tool-search-1", { query: "replay query" }, undefined);
+    const ref = firstSearch.details.fullContentRef;
+
+    await searchTool!.execute("tool-search-evict", { query: "evict query" }, undefined);
+
+    const replayed = await readFullTool!.execute("tool-read-replay", { ref, section: "content", resultIndex: 1 }, undefined);
+    expect(replayed).toEqual({
+      content: [{ type: "text", text: "Replayed content" }],
+      details: {
+        ref,
+        kind: "search",
+        section: "content",
+        resultIndex: 1,
+        servedFrom: "replay",
+      },
+    });
+
+    const cached = await readFullTool!.execute("tool-read-cached", { ref, section: "content", resultIndex: 1 }, undefined);
+    expect(cached.details.ref).toBe(ref);
+    expect(cached.details.servedFrom).toBe("cache");
+    expect(cached.content[0]?.text).toBe("Replayed content");
+  });
+
+  it("supports fetch file mode after replay rebuilds an evicted payload", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const urlCallCounts = new Map<string, number>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { url?: string };
+        const url = payload.url;
+        const nextCount = (urlCallCounts.get(url ?? "") ?? 0) + 1;
+        urlCallCounts.set(url ?? "", nextCount);
+
+        if (url === "https://example.com/replay-file") {
+          if (nextCount === 1) {
+            return jsonResponse({
+              title: "Original title",
+              content: "Original fetch content",
+              links: ["https://example.com/replay-file"],
+            });
+          }
+
+          return jsonResponse({
+            title: "Replayed title",
+            content: "Replayed fetch content",
+            links: ["https://example.com/replay-file"],
+          });
+        }
+
+        if (url === "https://example.com/evict-fetch") {
+          return jsonResponse({
+            title: "Huge",
+            content: "y".repeat(1_200_000),
+            links: ["https://example.com/evict-fetch"],
+          });
+        }
+
+        throw new Error(`Unexpected fetch url in test: ${String(url)}`);
+      }),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool!.execute("tool-fetch-1", { url: "https://example.com/replay-file" }, new AbortController().signal);
+    const fullContentRef = fetchResult.details.fullContentRef;
+
+    await fetchTool!.execute("tool-fetch-evict", { url: "https://example.com/evict-fetch" }, new AbortController().signal);
+
+    const fileResult = await readFullTool!.execute(
+      "tool-read-file-replay",
+      { ref: fullContentRef, section: "content", mode: "file" },
+      new AbortController().signal,
+    );
+
+    try {
+      expect(fileResult.details.fullContentRef).toBe(fullContentRef);
+      expect(fileResult.details.servedFrom).toBe("replay");
+      expect(fileResult.details.temporary).toBe(true);
+      expect(await readFile(fileResult.details.outputPath, "utf8")).toBe("Replayed fetch content");
+
+      const inlineCached = await readFullTool!.execute(
+        "tool-read-inline-after-file",
+        { ref: fullContentRef, section: "content" },
+        new AbortController().signal,
+      );
+
+      expect(inlineCached.details.fullContentRef).toBe(fullContentRef);
+      expect(inlineCached.details.servedFrom).toBe("cache");
+      expect(inlineCached.content[0]?.text).toBe("Replayed fetch content");
+    } finally {
+      await rm(fileResult.details.outputPath, { force: true });
+    }
+  });
+
+  it("fails search replay clearly when URL occurrence mapping cannot be reconstructed", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const queryCallCounts = new Map<string, number>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+        const query = payload.query;
+        const nextCount = (queryCallCounts.get(query ?? "") ?? 0) + 1;
+        queryCallCounts.set(query ?? "", nextCount);
+
+        if (query === "duplicate query") {
+          if (nextCount === 1) {
+            return jsonResponse({
+              results: [
+                { title: "A1", url: "https://example.com/a", content: "orig-a1" },
+                { title: "B1", url: "https://example.com/b", content: "orig-b1" },
+                { title: "A2", url: "https://example.com/a", content: "orig-a2" },
+              ],
+            });
+          }
+
+          return jsonResponse({
+            results: [
+              { title: "A1 replay", url: "https://example.com/a", content: "replay-a1" },
+              { title: "B1 replay", url: "https://example.com/b", content: "replay-b1" },
+            ],
+          });
+        }
+
+        if (query === "evict duplicate") {
+          return jsonResponse({
+            results: [{ title: "Huge", url: "https://example.com/huge", content: "z".repeat(1_200_000) }],
+          });
+        }
+
+        throw new Error(`Unexpected search query in test: ${String(query)}`);
+      }),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResult = await searchTool!.execute("tool-search-dup", { query: "duplicate query" }, undefined);
+    const ref = searchResult.details.fullContentRef;
+
+    await searchTool!.execute("tool-search-evict-dup", { query: "evict duplicate" }, undefined);
+
+    await expect(readFullTool!.execute("tool-read-dup-fail", { ref, section: "content", resultIndex: 3 }, undefined)).rejects.toThrow(
+      new RegExp(
+        `^No stored content found for ref ${ref.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\. Replay also failed: Unable to reconstruct original result 3 for URL https://example\\.com/a \\(occurrence 2\\) during replay\\.$`,
+      ),
+    );
   });
 
   it("isolates search retrieval refs between extension instances and clears them on session_start", async () => {
