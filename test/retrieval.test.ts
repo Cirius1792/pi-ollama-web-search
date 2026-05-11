@@ -424,6 +424,74 @@ describe("readFullFetchContent replay recovery", () => {
     expect(replayFetch).not.toHaveBeenCalled();
   });
 
+  it("validates explicit file output preconditions before replaying an evicted ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    accessMock.mockResolvedValueOnce();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        mode: "file",
+        outputPath: "/workspace/project/export.txt",
+        overwrite: false,
+      }),
+    ).rejects.toThrow("File already exists: /workspace/project/export.txt. Pass overwrite=true to replace it.");
+
+    expect(replayFetch).not.toHaveBeenCalled();
+    expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it("trims sourceUrl before storing replay metadata", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "  https://example.com/source  " },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/source", signal: undefined });
+  });
+
   it("rebuilds payload for file mode reads after replay", async () => {
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replayed title",

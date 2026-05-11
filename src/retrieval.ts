@@ -298,8 +298,10 @@ export function createFetchRetrievalStore(options?: {
       fullContentRef = createOpaqueFetchRef();
     }
 
+    const sourceUrl = registerOptions?.sourceUrl?.trim();
+
     fetchReplayMetadata.set(fullContentRef, {
-      sourceUrl: registerOptions?.sourceUrl,
+      sourceUrl: sourceUrl ? sourceUrl : undefined,
     });
 
     cacheFetchPayload(fullContentRef, payload);
@@ -344,11 +346,26 @@ export function createFetchRetrievalStore(options?: {
     const mode = params.mode ?? "inline";
     const offset = params.offset ?? 0;
 
+    let hasExplicitOutputPath = false;
+    let outputPath: string | undefined;
+
     if (mode === "inline") {
       validateNonNegativeInteger("offset", offset);
 
       if (params.maxChars !== undefined) {
         validatePositiveInteger("maxChars", params.maxChars);
+      }
+    } else {
+      hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
+      outputPath = hasExplicitOutputPath
+        ? resolveOutputPath(params.outputPath!.trim(), params.cwd ?? process.cwd())
+        : join(temporaryExportRoot, `${randomBytes(12).toString("hex")}-${params.section}.txt`);
+
+      if (hasExplicitOutputPath && !params.overwrite) {
+        const exists = await pathExists(outputPath);
+        if (exists) {
+          throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
+        }
       }
     }
 
@@ -356,31 +373,27 @@ export function createFetchRetrievalStore(options?: {
     const sectionText = getSectionText(payload, params.section);
 
     if (mode === "file") {
-      const hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
-      const outputPath = hasExplicitOutputPath
-        ? resolveOutputPath(params.outputPath!.trim(), params.cwd ?? process.cwd())
-        : join(temporaryExportRoot, `${randomBytes(12).toString("hex")}-${params.section}.txt`);
-
+      const resolvedOutputPath = outputPath!;
       let overwritten = false;
 
       if (!hasExplicitOutputPath) {
         hasTemporaryExports = true;
       }
 
-      await withFileMutationQueue(outputPath, async () => {
+      await withFileMutationQueue(resolvedOutputPath, async () => {
         params.signal?.throwIfAborted();
 
         if (hasExplicitOutputPath) {
-          const exists = await pathExists(outputPath);
+          const exists = await pathExists(resolvedOutputPath);
           if (exists && !params.overwrite) {
-            throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
+            throw new Error(`File already exists: ${resolvedOutputPath}. Pass overwrite=true to replace it.`);
           }
           overwritten = exists && params.overwrite === true;
         }
 
-        await mkdir(dirname(outputPath), { recursive: true });
+        await mkdir(dirname(resolvedOutputPath), { recursive: true });
         params.signal?.throwIfAborted();
-        await writeFile(outputPath, sectionText, {
+        await writeFile(resolvedOutputPath, sectionText, {
           encoding: "utf8",
           flag: hasExplicitOutputPath ? (params.overwrite ? "w" : "wx") : "w",
           signal: params.signal,
@@ -395,7 +408,7 @@ export function createFetchRetrievalStore(options?: {
           section: params.section,
           fullContentRef: params.fullContentRef,
           servedFrom,
-          outputPath,
+          outputPath: resolvedOutputPath,
           charsWritten: sectionText.length,
           temporary: !hasExplicitOutputPath,
           overwritten,
