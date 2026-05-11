@@ -325,7 +325,9 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
         return normalizeWebFetchResponse(raw);
       } finally {
         replay.settled = true;
-        inFlightReplays.delete(ref);
+        if (inFlightReplays.get(ref) === replay) {
+          inFlightReplays.delete(ref);
+        }
       }
     })();
     replay.promise.catch(() => undefined);
@@ -373,6 +375,10 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
     }
 
     let replay = inFlightReplays.get(ref);
+    if (replay?.controller.signal.aborted) {
+      replay = undefined;
+    }
+
     if (!replay) {
       replay = createInFlightReplay(ref, replayFetch, { url: entry.replay.url });
       inFlightReplays.set(ref, replay);

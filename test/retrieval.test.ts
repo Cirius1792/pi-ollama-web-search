@@ -804,6 +804,78 @@ describe("registerFetchRetrieval replay recovery", () => {
     expect(replaySignal?.aborted).toBe(true);
   });
 
+  it("starts a fresh replay after the last waiter aborts even if the aborted replay has not settled yet", async () => {
+    const store = createFetchRetrievalStore();
+    const waitingController = new AbortController();
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    let firstReplayReject: ((reason?: unknown) => void) | undefined;
+    let firstReplaySignal: AbortSignal | undefined;
+    let replayAttempt = 0;
+    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
+      replayAttempt += 1;
+
+      if (replayAttempt === 1) {
+        firstReplaySignal = signal;
+        return new Promise<never>((_resolve, reject) => {
+          firstReplayReject = reject;
+        });
+      }
+
+      return {
+        title: "Fresh replay title",
+        content: "Fresh replay content",
+        links: ["https://example.com/fresh-replay"],
+      };
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const abortedWaiter = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+      signal: waitingController.signal,
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    waitingController.abort();
+    await expect(abortedWaiter).rejects.toMatchObject({ name: "AbortError" });
+    expect(firstReplaySignal?.aborted).toBe(true);
+
+    const freshCaller = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    await expect(freshCaller).resolves.toMatchObject({
+      mode: "inline",
+      text: "Fresh replay content",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledTimes(2);
+
+    firstReplayReject?.(abortError);
+  });
+
   it("issues unique refs for identical payloads", async () => {
     const payload = {
       title: "same title",
