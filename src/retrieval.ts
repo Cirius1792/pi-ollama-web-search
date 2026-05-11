@@ -92,7 +92,6 @@ export type FetchReplayDependency = (replay: FetchReplayInput, signal?: AbortSig
 
 export interface RegisterFetchRetrievalReplay {
   url: string;
-  replayFetch?: FetchReplayDependency;
 }
 
 export interface FetchRetrievalStoreOptions {
@@ -102,7 +101,7 @@ export interface FetchRetrievalStoreOptions {
 interface StoredFetchEntry {
   payload?: NormalizedFetchResponse;
   retainedBytes: number;
-  replay?: RegisterFetchRetrievalReplay;
+  replay?: FetchRetrievalReplayMetadata;
 }
 
 interface InFlightFetchReplay {
@@ -369,7 +368,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
 
     signal?.throwIfAborted();
 
-    const replayFetch = entry.replay.replayFetch ?? options.replayFetch;
+    const replayFetch = options.replayFetch;
     if (!replayFetch) {
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: replayFetch dependency is not configured.`);
     }
@@ -424,7 +423,6 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       replay: replay
         ? {
             url: replay.url,
-            ...(replay.replayFetch ? { replayFetch: replay.replayFetch } : {}),
           }
         : undefined,
       retainedBytes: 0,
@@ -472,17 +470,30 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
   }
 
   async function readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult> {
-    const { payload, servedFrom } = await getOrReplayPayload(params.fullContentRef, params.signal);
-    const sectionText = getSectionText(payload, params.section);
     const mode = params.mode ?? "inline";
 
+    params.signal?.throwIfAborted();
+
     if (mode === "file") {
+      requireEntry(params.fullContentRef);
       const hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
       const outputPath = hasExplicitOutputPath
         ? resolveOutputPath(params.outputPath!.trim(), params.cwd ?? process.cwd())
         : join(temporaryExportRoot, `${randomBytes(12).toString("hex")}-${params.section}.txt`);
 
       let overwritten = false;
+      let explicitOutputExists = false;
+
+      if (hasExplicitOutputPath) {
+        explicitOutputExists = await pathExists(outputPath);
+        if (explicitOutputExists && !params.overwrite) {
+          throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
+        }
+        overwritten = explicitOutputExists && params.overwrite === true;
+      }
+
+      const { payload, servedFrom } = await getOrReplayPayload(params.fullContentRef, params.signal);
+      const sectionText = getSectionText(payload, params.section);
 
       if (!hasExplicitOutputPath) {
         hasTemporaryExports = true;
@@ -491,7 +502,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       await withFileMutationQueue(outputPath, async () => {
         params.signal?.throwIfAborted();
 
-        if (hasExplicitOutputPath) {
+        if (hasExplicitOutputPath && !explicitOutputExists) {
           const exists = await pathExists(outputPath);
           if (exists && !params.overwrite) {
             throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
@@ -531,6 +542,8 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       validatePositiveInteger("maxChars", params.maxChars);
     }
 
+    const { payload, servedFrom } = await getOrReplayPayload(params.fullContentRef, params.signal);
+    const sectionText = getSectionText(payload, params.section);
     const slicedText = params.maxChars === undefined ? sectionText.slice(offset) : sectionText.slice(offset, offset + params.maxChars);
 
     return {

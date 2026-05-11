@@ -54,9 +54,6 @@ describe("runOllamaWebFetch", () => {
       retrieval: {
         target: "fetch",
         sections: ["title", "content", "links"],
-        replay: {
-          url: "ollama.com",
-        },
         targets: {
           title: { section: "title" },
           content: { section: "content" },

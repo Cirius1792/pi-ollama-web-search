@@ -236,6 +236,25 @@ describe("readFullFetchContent file exports", () => {
     expect(writeFileMock).not.toHaveBeenCalled();
   });
 
+  it("checks abort and ref validity before explicit file preflight", async () => {
+    const store = createFetchRetrievalStore();
+    const controller = new AbortController();
+    controller.abort();
+    accessMock.mockResolvedValueOnce();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: "fetch:missing",
+        section: "content",
+        mode: "file",
+        outputPath: "/workspace/project/export.txt",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(accessMock).not.toHaveBeenCalled();
+  });
+
   it("overwrites an existing explicit export only when overwrite=true", async () => {
     const store = createFetchRetrievalStore();
     const record = store.registerFetchRetrieval({
@@ -306,12 +325,13 @@ describe("readFullFetchContent file exports", () => {
 
 describe("registerFetchRetrieval replay recovery", () => {
   it("replays evicted refs for inline reads, rebuilds the cache under the same ref, and reports servedFrom", async () => {
-    const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
       content: "Replay content",
       links: ["https://example.com/replay"],
     });
+
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -321,7 +341,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -366,12 +385,13 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("replays evicted refs for file exports and preserves existing export behavior", async () => {
-    const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
       content: "Replay file body",
       links: ["https://example.com/replay"],
     });
+
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -381,7 +401,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -420,8 +439,9 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("includes cache-miss and replay-failure context when fetch replay fails", async () => {
-    const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
+
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -431,7 +451,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -450,11 +469,12 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("includes cache-miss and replay-failure context when fetch replay returns a malformed payload", async () => {
-    const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
       links: ["https://example.com/replay"],
     });
+
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -464,7 +484,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -485,7 +504,6 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("aborts an in-progress fetch replay when its only waiting caller aborts and preserves AbortError", async () => {
-    const store = createFetchRetrievalStore();
     const controller = new AbortController();
     const abortError = new DOMException("The operation was aborted.", "AbortError");
     let replaySignal: AbortSignal | undefined;
@@ -505,6 +523,8 @@ describe("registerFetchRetrieval replay recovery", () => {
       });
     });
 
+    const store = createFetchRetrievalStore({ replayFetch });
+
     const original = store.registerFetchRetrieval(
       {
         title: "Original title",
@@ -513,7 +533,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -539,13 +558,14 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("rejects an already-aborted signal before starting fetch replay", async () => {
-    const store = createFetchRetrievalStore();
     const controller = new AbortController();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
       content: "Replay content",
       links: ["https://example.com/replay"],
     });
+
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -555,7 +575,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -578,15 +597,13 @@ describe("registerFetchRetrieval replay recovery", () => {
     expect(replayFetch).not.toHaveBeenCalled();
   });
 
-  it("dedupes concurrent replays for the same evicted fetch ref", async () => {
-    const store = createFetchRetrievalStore();
-    let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
-    const replayFetch = vi.fn().mockImplementation(
-      () =>
-        new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
-          resolveReplay = resolve;
-        }),
-    );
+  it("validates inline parameters before starting fetch replay", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -596,7 +613,83 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+        offset: -1,
+      }),
+    ).rejects.toThrow("offset must be a non-negative integer.");
+
+    expect(replayFetch).not.toHaveBeenCalled();
+  });
+
+  it("checks explicit file overwrite preflight before starting fetch replay", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+    accessMock.mockResolvedValueOnce();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+        mode: "file",
+        outputPath: "/workspace/project/export.txt",
+      }),
+    ).rejects.toThrow("File already exists: /workspace/project/export.txt. Pass overwrite=true to replace it.");
+
+    expect(replayFetch).not.toHaveBeenCalled();
+  });
+
+  it("dedupes concurrent replays for the same evicted fetch ref", async () => {
+    let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
+    const replayFetch = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
+          resolveReplay = resolve;
+        }),
+    );
+
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
       },
     );
 
@@ -659,7 +752,6 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("rejects an aborted waiter promptly without aborting unrelated waiters sharing the replay", async () => {
-    const store = createFetchRetrievalStore();
     const secondController = new AbortController();
     let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
     let replaySignal: AbortSignal | undefined;
@@ -672,6 +764,8 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
     );
 
+    const store = createFetchRetrievalStore({ replayFetch });
+
     const original = store.registerFetchRetrieval(
       {
         title: "Original title",
@@ -680,7 +774,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -744,7 +837,6 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("aborts the upstream replay once all concurrent waiters abort", async () => {
-    const store = createFetchRetrievalStore();
     const firstController = new AbortController();
     const secondController = new AbortController();
     const abortError = new DOMException("The operation was aborted.", "AbortError");
@@ -764,6 +856,8 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
     );
 
+    const store = createFetchRetrievalStore({ replayFetch });
+
     const original = store.registerFetchRetrieval(
       {
         title: "Original title",
@@ -772,7 +866,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -805,7 +898,6 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("starts a fresh replay after the last waiter aborts even if the aborted replay has not settled yet", async () => {
-    const store = createFetchRetrievalStore();
     const waitingController = new AbortController();
     const abortError = new DOMException("The operation was aborted.", "AbortError");
     let firstReplayReject: ((reason?: unknown) => void) | undefined;
@@ -828,6 +920,8 @@ describe("registerFetchRetrieval replay recovery", () => {
       };
     });
 
+    const store = createFetchRetrievalStore({ replayFetch });
+
     const original = store.registerFetchRetrieval(
       {
         title: "Original title",
@@ -836,7 +930,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -877,7 +970,6 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("aborts in-flight fetch replays when the store is cleared", async () => {
-    const store = createFetchRetrievalStore();
     const abortError = new DOMException("The operation was aborted.", "AbortError");
     let replayReject: ((reason?: unknown) => void) | undefined;
     let replaySignal: AbortSignal | undefined;
@@ -888,6 +980,8 @@ describe("registerFetchRetrieval replay recovery", () => {
       });
     });
 
+    const store = createFetchRetrievalStore({ replayFetch });
+
     const original = store.registerFetchRetrieval(
       {
         title: "Original title",
@@ -896,7 +990,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -928,7 +1021,6 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("does not repopulate cleared fetch state when an aborted replay resolves late", async () => {
-    const store = createFetchRetrievalStore();
     let replaySignal: AbortSignal | undefined;
     let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
     const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
@@ -938,6 +1030,8 @@ describe("registerFetchRetrieval replay recovery", () => {
       });
     });
 
+    const store = createFetchRetrievalStore({ replayFetch });
+
     const original = store.registerFetchRetrieval(
       {
         title: "Original title",
@@ -946,7 +1040,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -1057,12 +1150,13 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("replays refs after count-based payload eviction and rebuilds the cache under the same ref", async () => {
-    const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
       content: "Replay content after count eviction",
       links: ["https://example.com/replay"],
     });
+
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const original = store.registerFetchRetrieval(
       {
@@ -1072,7 +1166,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 
@@ -1161,12 +1254,12 @@ describe("registerFetchRetrieval replay recovery", () => {
   });
 
   it("retains replay metadata for older fetch refs even after many newer refs are registered", async () => {
-    const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
       content: "Replay content after metadata pressure",
       links: ["https://example.com/replay"],
     });
+    const store = createFetchRetrievalStore({ replayFetch });
 
     const oldest = store.registerFetchRetrieval(
       {
@@ -1176,7 +1269,6 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
       {
         url: "https://example.com/original",
-        replayFetch,
       },
     );
 

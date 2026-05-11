@@ -1144,15 +1144,115 @@ describe("extension", () => {
     expect(fake.pi.registerCommand).not.toHaveBeenCalled();
   });
 
-  it("registers search and fetch debug commands when dev mode is enabled", () => {
+  it("registers search, fetch, and read-full debug commands when dev mode is enabled", () => {
     process.env.PI_OLLAMA_SEARCH_DEV = "1";
     const fake = createFakePi();
     extension(fake.pi as any);
 
     expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-search", expect.any(Object));
     expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-fetch", expect.any(Object));
+    expect(fake.pi.registerCommand).toHaveBeenCalledWith("ollama-read-full", expect.any(Object));
     expect(fake.commands["ollama-search"].description).toContain("debug");
     expect(fake.commands["ollama-fetch"].description).toContain("debug");
+    expect(fake.commands["ollama-read-full"].description).toContain("JSON args");
+  });
+
+  it("runs the read-full debug command through the same retrieval flow", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+    process.env.PI_OLLAMA_SEARCH_DEV = "1";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({ title: "Example", content: "Body", links: ["https://example.com/a"] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+    const notify = vi.fn();
+
+    await fake.commands["ollama-read-full"].handler(
+      JSON.stringify({ ref: fullContentRef, section: "content" }),
+      { signal: new AbortController().signal, ui: { notify } },
+    );
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(fake.pi.sendMessage).toHaveBeenCalledWith({
+      customType: "ollama-web-read-full-debug",
+      content: "Body",
+      display: true,
+      details: {
+        mode: "inline",
+        target: "fetch",
+        section: "content",
+        fullContentRef,
+        servedFrom: "cache",
+        offset: 0,
+        maxChars: undefined,
+        totalChars: 4,
+        returnedChars: 4,
+      },
+    });
+  });
+
+  it("supports file-mode exports through the read-full debug command", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+    process.env.PI_OLLAMA_SEARCH_DEV = "1";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({ title: "Example", content: "Body", links: ["https://example.com/a"] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+    const notify = vi.fn();
+    const workspaceDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-debug-read-full-"));
+
+    try {
+      await fake.commands["ollama-read-full"].handler(
+        JSON.stringify({ ref: fullContentRef, section: "content", mode: "file", path: "exports/body.txt" }),
+        { cwd: workspaceDir, signal: new AbortController().signal, ui: { notify } },
+      );
+
+      expect(notify).not.toHaveBeenCalled();
+      expect(fake.pi.sendMessage).toHaveBeenLastCalledWith({
+        customType: "ollama-web-read-full-debug",
+        content: `Wrote full section to ${join(workspaceDir, "exports/body.txt")}. Delete this file when you no longer need it.`,
+        display: true,
+        details: {
+          mode: "file",
+          target: "fetch",
+          section: "content",
+          fullContentRef,
+          servedFrom: "cache",
+          outputPath: join(workspaceDir, "exports/body.txt"),
+          charsWritten: 4,
+          temporary: false,
+          overwritten: false,
+        },
+      });
+      expect(await readFile(join(workspaceDir, "exports/body.txt"), "utf8")).toBe("Body");
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
   });
 
   it("registers a session_start warning for missing API key", async () => {

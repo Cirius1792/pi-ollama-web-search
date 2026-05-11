@@ -26,6 +26,9 @@ Tool behavior:
     - If `path` is omitted, the tool writes to a generated temp file outside the repo and deletes it at session shutdown.
     - If `path` is provided, the tool resolves it like pi file tools (relative to the current working directory, absolute paths allowed, leading `@` tolerated), creates parent directories automatically, and refuses to overwrite unless `overwrite: true` is passed.
     - `outputPath` is still accepted as a backward-compatible alias, but `path` is canonical.
+  - Read-full responses include structured retrieval details.
+    - `servedFrom: "cache"` means the ref was still available in memory.
+    - `servedFrom: "replay"` means the extension replayed the original search or fetch request after cache loss, so the retrieved web content may have changed.
 
 ## Install
 
@@ -76,6 +79,7 @@ The extension includes prompt guidance so pi proactively uses tools when appropr
    - `ref`: the `fullContentRef` value,
    - `resultIndex`: 1-based result number,
    - `section`: one of `title`, `url`, or `content`.
+4. If the in-memory search payload has been evicted, `ollama_web_read_full` may replay the original search request and remap the requested `resultIndex` by the original URL occurrence rather than blindly trusting the replayed numeric position.
 
 ### Fetch retrieval flow
 
@@ -86,9 +90,10 @@ The extension includes prompt guidance so pi proactively uses tools when appropr
    - `section`: one of `title`, `content`, or `links`.
 4. Use `mode: "file"` when you want the full fetch section written to disk instead of returned inline.
 5. Optional file-mode controls:
-   - Omit `path` to create a temporary export file that is cleaned up at session shutdown.
-   - Set `path` to keep a persistent export.
-   - Set `overwrite: true` only when you intentionally want to replace an existing explicit export file.
+    - Omit `path` to create a temporary export file that is cleaned up at session shutdown.
+    - Set `path` to keep a persistent export that remains on disk until you delete it.
+    - Set `overwrite: true` only when you intentionally want to replace an existing explicit export file.
+6. If the in-memory fetch payload has been evicted, `ollama_web_read_full` may replay the original fetch request. Replay keeps the same ref but can return changed web content, and `details.servedFrom` will be `"replay"`.
 
 Example prompts:
 
@@ -124,9 +129,26 @@ Then run:
 ```text
 /ollama-search what is ollama?
 /ollama-fetch https://ollama.com
+/ollama-read-full {"ref":"fetch:...","section":"content"}
+```
+
+`/ollama-read-full` accepts a JSON object matching the production tool parameters. This gives developers a direct way to verify inline reads, file exports, replay behavior, and temp-file cleanup through the same retrieval path used by `ollama_web_read_full`.
+
+Examples:
+
+```text
+/ollama-read-full {"ref":"ws_s_...","resultIndex":1,"section":"content"}
+/ollama-read-full {"ref":"fetch:...","section":"links"}
+/ollama-read-full {"ref":"fetch:...","section":"content","mode":"file"}
+/ollama-read-full {"ref":"fetch:...","section":"content","mode":"file","path":"@artifacts/page.txt"}
 ```
 
 Debug commands are intended for local testing and troubleshooting. They are not part of the normal user workflow.
+
+Cleanup expectations:
+
+- Temp exports created by `ollama_web_read_full` without `path` are deleted automatically at session shutdown.
+- Persistent exports created with explicit `path` are left in place and should be deleted when no longer needed.
 
 Changing `PI_OLLAMA_SEARCH_DEV` requires restarting pi or reloading extensions.
 
@@ -192,4 +214,5 @@ Then run:
 ```text
 /ollama-search what is ollama?
 /ollama-fetch https://ollama.com
+/ollama-read-full {"ref":"fetch:...","section":"content"}
 ```

@@ -48,9 +48,11 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
 
   const registerFetchRetrieval = options.registerFetchRetrieval ?? registerFetchRetrievalDefault;
   const normalizedPayload = normalizeWebFetchResponse(raw);
-  const replay: RegisterFetchRetrievalReplay = {
-    url: trimmedUrl,
-  };
+  const replay: RegisterFetchRetrievalReplay | undefined = options.registerFetchRetrieval
+    ? {
+        url: trimmedUrl,
+      }
+    : undefined;
   const normalized = registerFetchRetrieval(normalizedPayload, replay);
   const formattedResult = formatFetchResultWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,
