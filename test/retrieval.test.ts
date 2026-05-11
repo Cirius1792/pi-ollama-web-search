@@ -449,6 +449,41 @@ describe("registerFetchRetrieval replay recovery", () => {
     ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}. Replay failed: upstream unavailable`);
   });
 
+  it("includes cache-miss and replay-failure context when fetch replay returns a malformed payload", async () => {
+    const store = createFetchRetrievalStore();
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      links: ["https://example.com/replay"],
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(
+      `No stored full content found for ref: ${original.fullContentRef}. Replay failed: Unexpected Ollama web fetch response: content must be a string`,
+    );
+  });
+
   it("forwards abort signals to fetch replay and preserves AbortError", async () => {
     const store = createFetchRetrievalStore();
     const controller = new AbortController();

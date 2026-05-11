@@ -265,9 +265,10 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: replayFetch dependency is not configured.`);
     }
 
-    let raw: unknown;
+    let payload: NormalizedFetchResponse;
     try {
-      raw = await entry.replay.replayFetch({ url: entry.replay.url }, signal);
+      const raw = await entry.replay.replayFetch({ url: entry.replay.url }, signal);
+      payload = normalizeWebFetchResponse(raw);
     } catch (error) {
       if (isAbortError(error)) {
         throw error;
@@ -277,7 +278,6 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: ${message}`);
     }
 
-    const payload = normalizeWebFetchResponse(raw);
     evictPayload(entry);
     entry.payload = payload;
     entry.retainedBytes = measureRetainedBytes(payload);

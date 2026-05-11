@@ -395,6 +395,60 @@ describe("extension", () => {
     );
   });
 
+  it("fails clearly when fetch replay returns a malformed payload after a cache miss", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Original title",
+            content: "Original content",
+            links: ["https://example.com/original"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Evictor",
+            content: "x".repeat(1_200_000),
+            links: ["https://example.com/evictor"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Replay title",
+            links: ["https://example.com/replay"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-fetch", { url: "https://example.com/original" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    await fetchTool?.execute("call-evict", { url: "https://example.com/evictor" }, new AbortController().signal);
+
+    await expect(
+      readFullTool?.execute("call-read-replay-malformed", { ref: fullContentRef, section: "content" }, new AbortController().signal),
+    ).rejects.toThrow(
+      `No stored full content found for ref: ${fullContentRef}. Replay failed: Unexpected Ollama web fetch response: content must be a string`,
+    );
+  });
+
   it("validates fetch-specific read-full parameter combinations", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
