@@ -1,52 +1,77 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFullContentRef, createSearchContentStore } from "../src/store.js";
-
-const searchContentStore = createSearchContentStore();
-
-function rememberSearchEntry(ref: string, marker: string): void {
-  searchContentStore.rememberSearchContent({
-    ref,
-    query: `query-${marker}`,
-    maxResults: 5,
-    payload: {
-      results: [{ title: `title-${marker}`, url: `https://example.com/${marker}`, content: `content-${marker}` }],
-    },
-  });
-}
+import { describe, expect, it } from "vitest";
+import { SEARCH_CONTENT_STORE_MAX_BYTES, createFullContentRef, createSearchContentStore } from "../src/store.js";
 
 describe("full content store", () => {
-  beforeEach(() => {
-    searchContentStore.clearSearchContentStore();
+  it("evicts cached payloads by retained bytes but preserves replay metadata for the same ref", () => {
+    const store = createSearchContentStore();
+    const firstRef = createFullContentRef("search");
+    const secondRef = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref: firstRef,
+      query: "first query",
+      maxResults: 5,
+      payload: {
+        results: [{ title: "first", url: "https://example.com/first", content: "a".repeat(900_000) }],
+      },
+    });
+
+    store.rememberSearchContent({
+      ref: secondRef,
+      query: "second query",
+      maxResults: 5,
+      payload: {
+        results: [{ title: "second", url: "https://example.com/second", content: "b".repeat(900_000) }],
+      },
+    });
+
+    expect(store.getStoredSearchContent(firstRef)).toBeUndefined();
+    expect(store.getStoredSearchReplay(firstRef)).toMatchObject({
+      ref: firstRef,
+      query: "first query",
+      maxResults: 5,
+      originalResultUrls: ["https://example.com/first"],
+    });
+    expect(store.getStoredSearchContent(secondRef)).toBeDefined();
   });
 
-  afterEach(() => {
-    searchContentStore.clearSearchContentStore();
-    vi.useRealTimers();
-  });
+  it("keeps the newest oversized search payload retrievable", () => {
+    const store = createSearchContentStore();
+    const oldRef = createFullContentRef("search");
+    const oversizedRef = createFullContentRef("search");
 
-  it("evicts older entries once the in-memory budget is exceeded", () => {
-    const refs: string[] = [];
+    store.rememberSearchContent({
+      ref: oldRef,
+      query: "old",
+      maxResults: 5,
+      payload: {
+        results: [{ title: "old", url: "https://example.com/old", content: "payload" }],
+      },
+    });
 
-    for (let i = 0; i < 300; i += 1) {
-      const ref = createFullContentRef("search");
-      refs.push(ref);
-      rememberSearchEntry(ref, String(i));
-    }
+    store.rememberSearchContent({
+      ref: oversizedRef,
+      query: "oversized",
+      maxResults: 5,
+      payload: {
+        results: [
+          {
+            title: "new",
+            url: "https://example.com/new",
+            content: "x".repeat(SEARCH_CONTENT_STORE_MAX_BYTES + 10_000),
+          },
+        ],
+      },
+    });
 
-    expect(searchContentStore.getStoredSearchContent(refs[0])).toBeUndefined();
-    expect(searchContentStore.getStoredSearchContent(refs.at(-1)!)).toBeDefined();
-  });
-
-  it("expires old entries after a TTL", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-
-    const ref = createFullContentRef("search");
-    rememberSearchEntry(ref, "ttl");
-
-    vi.advanceTimersByTime(24 * 60 * 60 * 1000);
-
-    expect(searchContentStore.getStoredSearchContent(ref)).toBeUndefined();
+    expect(store.getStoredSearchContent(oldRef)).toBeUndefined();
+    expect(store.getStoredSearchContent(oversizedRef)).toBeDefined();
+    expect(store.getStoredSearchReplay(oversizedRef)).toMatchObject({
+      ref: oversizedRef,
+      query: "oversized",
+      maxResults: 5,
+      originalResultUrls: ["https://example.com/new"],
+    });
   });
 
   it("generates opaque refs instead of short sequential IDs", () => {

@@ -19,42 +19,64 @@ export interface SearchRetrievalMetadata {
   results: SearchRetrievalResultMetadata[];
 }
 
-export interface StoredSearchContent {
+export interface StoredSearchRetrievalBase {
   kind: "search";
   ref: string;
   query: string;
   maxResults: number;
+}
+
+export interface StoredSearchReplay extends StoredSearchRetrievalBase {
+  originalResultUrls: string[];
+}
+
+export interface StoredSearchContent extends StoredSearchRetrievalBase {
   payload: NormalizedSearchResponse;
 }
 
-const SEARCH_CONTENT_STORE_MAX_ENTRIES = 128;
-const SEARCH_CONTENT_STORE_TTL_MS = 15 * 60 * 1000;
+export const SEARCH_CONTENT_STORE_MAX_BYTES = 1_000_000;
 
-interface StoredEntry {
-  value: StoredSearchContent;
-  expiresAtMs: number;
+interface StoredSearchEntry {
+  replay: StoredSearchReplay;
+  payload?: NormalizedSearchResponse;
+  retainedBytes: number;
 }
 
 function createOpaqueRefToken(): string {
   return randomBytes(12).toString("base64url");
 }
 
-function pruneExpiredEntries(contentStore: Map<string, StoredEntry>, nowMs: number): void {
-  for (const [ref, entry] of contentStore) {
-    if (entry.expiresAtMs <= nowMs) {
-      contentStore.delete(ref);
-    }
-  }
+function buildStoredSearchReplay(input: {
+  ref: string;
+  query: string;
+  maxResults: number;
+  payload: NormalizedSearchResponse;
+}): StoredSearchReplay {
+  return {
+    kind: "search",
+    ref: input.ref,
+    query: input.query,
+    maxResults: input.maxResults,
+    originalResultUrls: input.payload.results.map((result) => result.url),
+  };
 }
 
-function enforceMaxEntries(contentStore: Map<string, StoredEntry>): void {
-  while (contentStore.size > SEARCH_CONTENT_STORE_MAX_ENTRIES) {
-    const oldestRef = contentStore.keys().next().value;
-    if (!oldestRef) {
-      return;
-    }
-    contentStore.delete(oldestRef);
+function toStoredSearchContent(entry: StoredSearchEntry): StoredSearchContent | undefined {
+  if (!entry.payload) {
+    return undefined;
   }
+
+  return {
+    kind: "search",
+    ref: entry.replay.ref,
+    query: entry.replay.query,
+    maxResults: entry.replay.maxResults,
+    payload: entry.payload,
+  };
+}
+
+function getRetainedBytes(payload: NormalizedSearchResponse): number {
+  return Buffer.byteLength(JSON.stringify(payload), "utf8");
 }
 
 export function createFullContentRef(_kind: "search"): string {
@@ -62,48 +84,89 @@ export function createFullContentRef(_kind: "search"): string {
 }
 
 export function createSearchContentStore() {
-  const contentStore = new Map<string, StoredEntry>();
+  const contentStore = new Map<string, StoredSearchEntry>();
+  let totalRetainedBytes = 0;
 
-  function rememberSearchContent(input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }): void {
-    const nowMs = Date.now();
-    pruneExpiredEntries(contentStore, nowMs);
+  function touchEntry(ref: string, entry: StoredSearchEntry): void {
+    contentStore.delete(ref);
+    contentStore.set(ref, entry);
+  }
 
-    contentStore.delete(input.ref);
-    contentStore.set(input.ref, {
-      value: {
-        kind: "search",
-        ref: input.ref,
-        query: input.query,
-        maxResults: input.maxResults,
-        payload: input.payload,
-      },
-      expiresAtMs: nowMs + SEARCH_CONTENT_STORE_TTL_MS,
-    });
+  function evictPayload(ref: string, entry: StoredSearchEntry): void {
+    if (!entry.payload || entry.retainedBytes === 0) {
+      return;
+    }
 
-    enforceMaxEntries(contentStore);
+    totalRetainedBytes -= entry.retainedBytes;
+    entry.payload = undefined;
+    entry.retainedBytes = 0;
+  }
+
+  function enforcePayloadBudget(newestRef: string): void {
+    if (totalRetainedBytes <= SEARCH_CONTENT_STORE_MAX_BYTES) {
+      return;
+    }
+
+    for (const [ref, entry] of contentStore) {
+      if (ref === newestRef) {
+        continue;
+      }
+
+      evictPayload(ref, entry);
+      if (totalRetainedBytes <= SEARCH_CONTENT_STORE_MAX_BYTES) {
+        return;
+      }
+    }
+  }
+
+  function rememberSearchContent(input: {
+    ref: string;
+    query: string;
+    maxResults: number;
+    payload: NormalizedSearchResponse;
+  }): void {
+    const replay = buildStoredSearchReplay(input);
+    const retainedBytes = getRetainedBytes(input.payload);
+    const existingEntry = contentStore.get(input.ref);
+
+    if (existingEntry) {
+      evictPayload(input.ref, existingEntry);
+    }
+
+    const entry: StoredSearchEntry = {
+      replay,
+      payload: input.payload,
+      retainedBytes,
+    };
+
+    totalRetainedBytes += retainedBytes;
+    touchEntry(input.ref, entry);
+    enforcePayloadBudget(input.ref);
   }
 
   function getStoredSearchContent(ref: string): StoredSearchContent | undefined {
-    const nowMs = Date.now();
-    pruneExpiredEntries(contentStore, nowMs);
-
     const entry = contentStore.get(ref);
-    if (!entry) {
+    if (!entry?.payload) {
       return undefined;
     }
 
-    contentStore.delete(ref);
-    contentStore.set(ref, entry);
-    return entry.value;
+    touchEntry(ref, entry);
+    return toStoredSearchContent(entry);
+  }
+
+  function getStoredSearchReplay(ref: string): StoredSearchReplay | undefined {
+    return contentStore.get(ref)?.replay;
   }
 
   function clearSearchContentStore(): void {
     contentStore.clear();
+    totalRetainedBytes = 0;
   }
 
   return {
     rememberSearchContent,
     getStoredSearchContent,
+    getStoredSearchReplay,
     clearSearchContentStore,
   };
 }
