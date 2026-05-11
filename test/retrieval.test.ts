@@ -876,6 +876,112 @@ describe("registerFetchRetrieval replay recovery", () => {
     firstReplayReject?.(abortError);
   });
 
+  it("aborts in-flight fetch replays when the store is cleared", async () => {
+    const store = createFetchRetrievalStore();
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    let replayReject: ((reason?: unknown) => void) | undefined;
+    let replaySignal: AbortSignal | undefined;
+    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
+      replaySignal = signal;
+      return new Promise<never>((_resolve, reject) => {
+        replayReject = reject;
+      });
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const readDuringReplay = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    store.clearFetchRetrievalStore();
+
+    expect(replaySignal?.aborted).toBe(true);
+
+    replayReject?.(abortError);
+    await expect(readDuringReplay).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}`);
+  });
+
+  it("does not repopulate cleared fetch state when an aborted replay resolves late", async () => {
+    const store = createFetchRetrievalStore();
+    let replaySignal: AbortSignal | undefined;
+    let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
+    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
+      replaySignal = signal;
+      return new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
+        resolveReplay = resolve;
+      });
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const readDuringReplay = store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+
+    store.clearFetchRetrievalStore();
+
+    expect(replaySignal?.aborted).toBe(true);
+
+    resolveReplay?.({
+      title: "Late replay title",
+      content: "Late replay content",
+      links: ["https://example.com/late-replay"],
+    });
+
+    await expect(readDuringReplay).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}`);
+  });
+
   it("issues unique refs for identical payloads", async () => {
     const payload = {
       title: "same title",

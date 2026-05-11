@@ -398,12 +398,17 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: ${message}`);
     }
 
-    if (!entry.payload) {
-      storePayload(ref, entry, payload);
+    const currentEntry = fetchRetrievalStore.get(ref);
+    if (currentEntry !== entry) {
+      return { payload, servedFrom: "replay" };
+    }
+
+    if (!currentEntry.payload) {
+      storePayload(ref, currentEntry, payload);
       enforceFetchStoreLimit(ref);
     } else {
-      touchPayload(ref, entry);
-      payload = entry.payload;
+      touchPayload(ref, currentEntry);
+      payload = currentEntry.payload;
     }
 
     return { payload, servedFrom: "replay" };
@@ -445,6 +450,12 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
   }
 
   function clearFetchRetrievalStore(): void {
+    for (const replay of inFlightReplays.values()) {
+      if (!replay.controller.signal.aborted) {
+        replay.controller.abort();
+      }
+    }
+
     fetchRetrievalStore.clear();
     payloadLru.clear();
     inFlightReplays.clear();
