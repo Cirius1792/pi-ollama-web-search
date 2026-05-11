@@ -383,6 +383,47 @@ describe("readFullFetchContent replay recovery", () => {
     );
   });
 
+  it("validates inline offset and maxChars before replaying an evicted ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        offset: -1,
+      }),
+    ).rejects.toThrow("offset must be a non-negative integer.");
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+        maxChars: 0,
+      }),
+    ).rejects.toThrow("maxChars must be a positive integer.");
+
+    expect(replayFetch).not.toHaveBeenCalled();
+  });
+
   it("rebuilds payload for file mode reads after replay", async () => {
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replayed title",

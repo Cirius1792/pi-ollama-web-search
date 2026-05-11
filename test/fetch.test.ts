@@ -113,6 +113,55 @@ describe("runOllamaWebFetch", () => {
     expect(first.normalized.fullContentRef).not.toBe(second.normalized.fullContentRef);
   });
 
+  it("forwards trimmed sourceUrl to registerFetchRetrieval", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          title: "Ollama",
+          content: "Cloud models",
+          links: ["https://ollama.com"],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const registerFetchRetrieval = vi.fn().mockImplementation((payload) => ({
+      ...payload,
+      fullContentRef: "fetch:aaaaaaaaaaaaaaaaaaaaaaaa",
+      retrieval: {
+        target: "fetch",
+        sections: ["title", "content", "links"],
+        targets: {
+          title: { section: "title", fullContentRef: "fetch:aaaaaaaaaaaaaaaaaaaaaaaa" },
+          content: { section: "content", fullContentRef: "fetch:aaaaaaaaaaaaaaaaaaaaaaaa" },
+          links: { section: "links", fullContentRef: "fetch:aaaaaaaaaaaaaaaaaaaaaaaa" },
+        },
+      },
+    }));
+
+    await runOllamaWebFetch(" https://ollama.com/page ", {
+      config: {
+        apiKey: "test-key",
+        devMode: false,
+        searchEndpoint: "https://example.test/api/web_search",
+        fetchEndpoint: "https://example.test/api/web_fetch",
+        maxResults: 5,
+        maxOutputChars: 50_000,
+      },
+      fetchImpl,
+      registerFetchRetrieval,
+    });
+
+    expect(registerFetchRetrieval).toHaveBeenCalledWith(
+      {
+        title: "Ollama",
+        content: "Cloud models",
+        links: ["https://ollama.com"],
+      },
+      { sourceUrl: "https://ollama.com/page" },
+    );
+  });
+
   it("trims url and rejects blank input", async () => {
     await expect(
       runOllamaWebFetch("   ", {

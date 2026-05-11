@@ -341,9 +341,19 @@ export function createFetchRetrievalStore(options?: {
   async function readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult> {
     params.signal?.throwIfAborted();
 
+    const mode = params.mode ?? "inline";
+    const offset = params.offset ?? 0;
+
+    if (mode === "inline") {
+      validateNonNegativeInteger("offset", offset);
+
+      if (params.maxChars !== undefined) {
+        validatePositiveInteger("maxChars", params.maxChars);
+      }
+    }
+
     const { payload, servedFrom } = await getPayloadForRead(params.fullContentRef, params.signal);
     const sectionText = getSectionText(payload, params.section);
-    const mode = params.mode ?? "inline";
 
     if (mode === "file") {
       const hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
@@ -391,13 +401,6 @@ export function createFetchRetrievalStore(options?: {
           overwritten,
         },
       };
-    }
-
-    const offset = params.offset ?? 0;
-    validateNonNegativeInteger("offset", offset);
-
-    if (params.maxChars !== undefined) {
-      validatePositiveInteger("maxChars", params.maxChars);
     }
 
     const slicedText = params.maxChars === undefined ? sectionText.slice(offset) : sectionText.slice(offset, offset + params.maxChars);
