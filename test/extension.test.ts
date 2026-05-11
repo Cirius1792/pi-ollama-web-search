@@ -110,6 +110,7 @@ describe("extension", () => {
     expect(typeof fullContentRef).toBe("string");
     expect(fetchResult?.details?.retrieval?.target).toBe("fetch");
     expect(fetchResult?.details?.retrieval?.sections).toEqual(["title", "content", "links"]);
+    expect(fetchResult?.details?.retrieval?.replay?.url).toBe("https://example.com");
     expect(fetchResult?.details?.retrieval?.targets?.title?.section).toBe("title");
     expect(fetchResult?.details?.retrieval?.targets?.content?.section).toBe("content");
     expect(fetchResult?.details?.retrieval?.targets?.links?.section).toBe("links");
@@ -122,6 +123,7 @@ describe("extension", () => {
     expect(inlineContentResult?.content?.[0]?.text).toBe("Long content body");
     expect(inlineContentResult?.details?.mode).toBe("inline");
     expect(inlineContentResult?.details?.section).toBe("content");
+    expect(inlineContentResult?.details?.servedFrom).toBe("cache");
     expect(inlineContentResult?.details?.offset).toBe(0);
 
     const inlineLinksResult = await readFullTool?.execute(
@@ -133,6 +135,7 @@ describe("extension", () => {
     expect(inlineLinksResult?.content?.[0]?.text).toBe("https://example.com/a\nhttps://example.com/b");
     expect(inlineLinksResult?.details?.mode).toBe("inline");
     expect(inlineLinksResult?.details?.section).toBe("links");
+    expect(inlineLinksResult?.details?.servedFrom).toBe("cache");
 
     const workspaceDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-workspace-"));
     let tempOutputPath: string | undefined;
@@ -148,6 +151,7 @@ describe("extension", () => {
       expect(fileResult?.content?.[0]?.text).toContain("Wrote full section to");
       expect(fileResult?.content?.[0]?.text).toContain("Delete this file when you no longer need it.");
       expect(fileResult?.details?.mode).toBe("file");
+      expect(fileResult?.details?.servedFrom).toBe("cache");
       expect(fileResult?.details?.temporary).toBe(false);
       expect(fileResult?.details?.outputPath).toBe(join(workspaceDir, "exports/title.txt"));
       expect(await readFile(fileResult?.details?.outputPath, "utf8")).toBe("Example title");
@@ -159,6 +163,7 @@ describe("extension", () => {
       );
 
       tempOutputPath = tempFileResult?.details?.outputPath;
+      expect(tempFileResult?.details?.servedFrom).toBe("cache");
       expect(tempFileResult?.details?.temporary).toBe(true);
       expect(await readFile(tempFileResult?.details?.outputPath, "utf8")).toBe("Long content body");
     } finally {
@@ -167,6 +172,147 @@ describe("extension", () => {
         await rm(tempOutputPath, { force: true });
       }
     }
+  });
+
+  it("replays evicted fetch refs for inline and file reads, then serves later reads from cache", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Original title",
+            content: "Original content",
+            links: ["https://example.com/original"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Evictor one",
+            content: "x".repeat(1_200_000),
+            links: ["https://example.com/evictor-1"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Replay inline title",
+            content: "Replay inline content",
+            links: ["https://example.com/replay-inline"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Evictor two",
+            content: "y".repeat(1_200_000),
+            links: ["https://example.com/evictor-2"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Replay file title",
+            content: "Replay file content",
+            links: ["https://example.com/replay-file"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-fetch-1", { url: "https://example.com/original" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    await fetchTool?.execute("call-evict-1", { url: "https://example.com/evict-1" }, new AbortController().signal);
+
+    const inlineReplayResult = await readFullTool?.execute(
+      "call-read-inline-replay",
+      { ref: fullContentRef, section: "content" },
+      new AbortController().signal,
+    );
+
+    expect(inlineReplayResult).toEqual({
+      content: [{ type: "text", text: "Replay inline content" }],
+      details: {
+        mode: "inline",
+        target: "fetch",
+        section: "content",
+        fullContentRef,
+        servedFrom: "replay",
+        offset: 0,
+        maxChars: undefined,
+        totalChars: "Replay inline content".length,
+        returnedChars: "Replay inline content".length,
+      },
+    });
+
+    await fetchTool?.execute("call-evict-2", { url: "https://example.com/evict-2" }, new AbortController().signal);
+
+    const workspaceDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-replay-"));
+    try {
+      const fileReplayResult = await readFullTool?.execute(
+        "call-read-file-replay",
+        { ref: fullContentRef, section: "content", mode: "file", path: "exports/replayed.txt" },
+        new AbortController().signal,
+        undefined,
+        { cwd: workspaceDir },
+      );
+
+      expect(fileReplayResult?.details).toEqual({
+        mode: "file",
+        target: "fetch",
+        section: "content",
+        fullContentRef,
+        servedFrom: "replay",
+        outputPath: join(workspaceDir, "exports/replayed.txt"),
+        charsWritten: "Replay file content".length,
+        temporary: false,
+        overwritten: false,
+      });
+      expect(await readFile(fileReplayResult?.details?.outputPath, "utf8")).toBe("Replay file content");
+
+      const cachedInlineResult = await readFullTool?.execute(
+        "call-read-inline-cache",
+        { ref: fullContentRef, section: "content" },
+        new AbortController().signal,
+      );
+
+      expect(cachedInlineResult).toEqual({
+        content: [{ type: "text", text: "Replay file content" }],
+        details: {
+          mode: "inline",
+          target: "fetch",
+          section: "content",
+          fullContentRef,
+          servedFrom: "cache",
+          offset: 0,
+          maxChars: undefined,
+          totalChars: "Replay file content".length,
+          returnedChars: "Replay file content".length,
+        },
+      });
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("propagates abort signal to fetch read-full retrieval", async () => {
@@ -201,6 +347,52 @@ describe("extension", () => {
     await expect(readFullTool?.execute("call-2", { ref: fullContentRef, section: "content" }, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
+  });
+
+  it("fails clearly when fetch replay fails after a cache miss", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Original title",
+            content: "Original content",
+            links: ["https://example.com/original"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            title: "Evictor",
+            content: "x".repeat(1_200_000),
+            links: ["https://example.com/evictor"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockRejectedValueOnce(new Error("fetch replay unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-fetch", { url: "https://example.com/original" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    await fetchTool?.execute("call-evict", { url: "https://example.com/evictor" }, new AbortController().signal);
+
+    await expect(
+      readFullTool?.execute("call-read-replay-fail", { ref: fullContentRef, section: "content" }, new AbortController().signal),
+    ).rejects.toThrow(
+      `No stored full content found for ref: ${fullContentRef}. Replay failed: Failed to reach Ollama Web API: fetch replay unavailable`,
+    );
   });
 
   it("validates fetch-specific read-full parameter combinations", async () => {

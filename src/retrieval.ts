@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { NormalizedFetchResponse } from "./normalize.js";
+import { normalizeWebFetchResponse, type NormalizedFetchResponse } from "./normalize.js";
 
 export const FETCH_RETRIEVAL_SECTIONS = ["title", "content", "links"] as const;
 
@@ -14,9 +14,14 @@ export interface FetchRetrievalTargetMetadata {
   fullContentRef: string;
 }
 
+export interface FetchRetrievalReplayMetadata {
+  url: string;
+}
+
 export interface FetchRetrievalMetadata {
   target: "fetch";
   sections: FetchRetrievalSection[];
+  replay?: FetchRetrievalReplayMetadata;
   targets: {
     title: FetchRetrievalTargetMetadata;
     content: FetchRetrievalTargetMetadata;
@@ -49,6 +54,7 @@ export interface ReadFullInlineResult {
     target: "fetch";
     section: FetchRetrievalSection;
     fullContentRef: string;
+    servedFrom: "cache" | "replay";
     offset: number;
     maxChars?: number;
     totalChars: number;
@@ -63,6 +69,7 @@ export interface ReadFullFileResult {
     target: "fetch";
     section: FetchRetrievalSection;
     fullContentRef: string;
+    servedFrom: "cache" | "replay";
     outputPath: string;
     charsWritten: number;
     temporary: boolean;
@@ -77,13 +84,23 @@ export const FETCH_RETRIEVAL_STORE_MAX_BYTES = 1_000_000;
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
-interface StoredFetchPayload {
-  payload: NormalizedFetchResponse;
+export interface FetchReplayInput {
+  url: string;
+}
+
+export interface RegisterFetchRetrievalReplay {
+  url: string;
+  replayFetch?: (replay: FetchReplayInput, signal?: AbortSignal) => Promise<unknown>;
+}
+
+interface StoredFetchEntry {
+  payload?: NormalizedFetchResponse;
   retainedBytes: number;
+  replay?: RegisterFetchRetrievalReplay;
 }
 
 export interface FetchRetrievalStore {
-  registerFetchRetrieval(payload: NormalizedFetchResponse): FetchRetrievalRecord;
+  registerFetchRetrieval(payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay): FetchRetrievalRecord;
   clearFetchRetrievalStore(): void;
   cleanupTemporaryExports(): Promise<void>;
   readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult>;
@@ -151,11 +168,33 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
 export function createFetchRetrievalStore(): FetchRetrievalStore {
-  const fetchRetrievalStore = new Map<string, StoredFetchPayload>();
+  const fetchRetrievalStore = new Map<string, StoredFetchEntry>();
   let fetchRetrievalStoreBytes = 0;
   const temporaryExportRoot = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}`);
   let hasTemporaryExports = false;
+
+  function touchEntry(ref: string, entry: StoredFetchEntry): void {
+    fetchRetrievalStore.delete(ref);
+    fetchRetrievalStore.set(ref, entry);
+  }
+
+  function evictPayload(entry: StoredFetchEntry): void {
+    if (!entry.payload || entry.retainedBytes === 0) {
+      return;
+    }
+
+    fetchRetrievalStoreBytes = Math.max(0, fetchRetrievalStoreBytes - entry.retainedBytes);
+    entry.payload = undefined;
+    entry.retainedBytes = 0;
+  }
 
   function evictOldestFetchRecord(): void {
     const oldestRef = fetchRetrievalStore.keys().next().value;
@@ -163,21 +202,33 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
 
     const removed = fetchRetrievalStore.get(oldestRef);
     if (removed) {
-      fetchRetrievalStoreBytes = Math.max(0, fetchRetrievalStoreBytes - removed.retainedBytes);
+      evictPayload(removed);
     }
     fetchRetrievalStore.delete(oldestRef);
   }
 
   function enforceFetchStoreLimit(retainRef?: string): void {
-    while (
-      fetchRetrievalStore.size > FETCH_RETRIEVAL_STORE_MAX_ENTRIES ||
-      (fetchRetrievalStoreBytes > FETCH_RETRIEVAL_STORE_MAX_BYTES && (!retainRef || fetchRetrievalStore.size > 1))
-    ) {
+    while (fetchRetrievalStore.size > FETCH_RETRIEVAL_STORE_MAX_ENTRIES) {
       evictOldestFetchRecord();
+    }
+
+    if (fetchRetrievalStoreBytes <= FETCH_RETRIEVAL_STORE_MAX_BYTES) {
+      return;
+    }
+
+    for (const [ref, entry] of fetchRetrievalStore) {
+      if (ref === retainRef) {
+        continue;
+      }
+
+      evictPayload(entry);
+      if (fetchRetrievalStoreBytes <= FETCH_RETRIEVAL_STORE_MAX_BYTES) {
+        return;
+      }
     }
   }
 
-  function requireRefPayload(fullContentRef: string): NormalizedFetchResponse {
+  function requireEntry(fullContentRef: string): { ref: string; entry: StoredFetchEntry } {
     const trimmedRef = fullContentRef.trim();
     if (!trimmedRef) {
       throw new Error("fullContentRef must not be empty.");
@@ -187,22 +238,64 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       throw new Error("fullContentRef must reference a fetch result.");
     }
 
-    const stored = fetchRetrievalStore.get(trimmedRef);
-    if (!stored) {
+    const entry = fetchRetrievalStore.get(trimmedRef);
+    if (!entry) {
       throw new Error(`No stored full content found for ref: ${trimmedRef}`);
     }
 
-    return stored.payload;
+    touchEntry(trimmedRef, entry);
+    return { ref: trimmedRef, entry };
   }
 
-  function registerFetchRetrieval(payload: NormalizedFetchResponse): FetchRetrievalRecord {
+  async function getOrReplayPayload(
+    fullContentRef: string,
+    signal?: AbortSignal,
+  ): Promise<{ payload: NormalizedFetchResponse; servedFrom: "cache" | "replay" }> {
+    const { ref, entry } = requireEntry(fullContentRef);
+    if (entry.payload) {
+      signal?.throwIfAborted();
+      return { payload: entry.payload, servedFrom: "cache" };
+    }
+
+    if (!entry.replay) {
+      throw new Error(`No stored full content found for ref: ${ref}`);
+    }
+
+    if (!entry.replay.replayFetch) {
+      throw new Error(`No stored full content found for ref: ${ref}. Replay failed: replayFetch dependency is not configured.`);
+    }
+
+    let raw: unknown;
+    try {
+      raw = await entry.replay.replayFetch({ url: entry.replay.url }, signal);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`No stored full content found for ref: ${ref}. Replay failed: ${message}`);
+    }
+
+    const payload = normalizeWebFetchResponse(raw);
+    evictPayload(entry);
+    entry.payload = payload;
+    entry.retainedBytes = measureRetainedBytes(payload);
+    fetchRetrievalStoreBytes += entry.retainedBytes;
+    touchEntry(ref, entry);
+    enforceFetchStoreLimit(ref);
+
+    return { payload, servedFrom: "replay" };
+  }
+
+  function registerFetchRetrieval(payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay): FetchRetrievalRecord {
     let fullContentRef = createOpaqueFetchRef();
     while (fetchRetrievalStore.has(fullContentRef)) {
       fullContentRef = createOpaqueFetchRef();
     }
 
     const retainedBytes = measureRetainedBytes(payload);
-    fetchRetrievalStore.set(fullContentRef, { payload, retainedBytes });
+    fetchRetrievalStore.set(fullContentRef, { payload, retainedBytes, replay });
     fetchRetrievalStoreBytes += retainedBytes;
     enforceFetchStoreLimit(fullContentRef);
 
@@ -212,6 +305,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       retrieval: {
         target: "fetch",
         sections: [...FETCH_RETRIEVAL_SECTIONS],
+        ...(replay ? { replay: { url: replay.url } } : {}),
         targets: {
           title: { section: "title", fullContentRef },
           content: { section: "content", fullContentRef },
@@ -236,9 +330,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
   }
 
   async function readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult> {
-    params.signal?.throwIfAborted();
-
-    const payload = requireRefPayload(params.fullContentRef);
+    const { payload, servedFrom } = await getOrReplayPayload(params.fullContentRef, params.signal);
     const sectionText = getSectionText(payload, params.section);
     const mode = params.mode ?? "inline";
 
@@ -281,6 +373,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
           target: "fetch",
           section: params.section,
           fullContentRef: params.fullContentRef,
+          servedFrom,
           outputPath,
           charsWritten: sectionText.length,
           temporary: !hasExplicitOutputPath,
@@ -306,6 +399,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
         target: "fetch",
         section: params.section,
         fullContentRef: params.fullContentRef,
+        servedFrom,
         offset,
         maxChars: params.maxChars,
         totalChars: sectionText.length,

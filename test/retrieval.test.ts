@@ -202,6 +202,7 @@ describe("readFullFetchContent file exports", () => {
       throw new Error("Expected file mode result");
     }
 
+    expect(result.details.servedFrom).toBe("cache");
     expect(result.details.outputPath).toBe("/workspace/project/exports/full/content.txt");
     expect(result.details.temporary).toBe(false);
     expect(result.details.overwritten).toBe(false);
@@ -258,6 +259,7 @@ describe("readFullFetchContent file exports", () => {
       throw new Error("Expected file mode result");
     }
 
+    expect(result.details.servedFrom).toBe("cache");
     expect(result.details.outputPath).toBe("/workspace/project/export.txt");
     expect(result.details.temporary).toBe(false);
     expect(result.details.overwritten).toBe(true);
@@ -287,6 +289,7 @@ describe("readFullFetchContent file exports", () => {
       throw new Error("Expected file mode result");
     }
 
+    expect(result.details.servedFrom).toBe("cache");
     expect(result.details.outputPath).toContain("pi-ollama-web-search-");
     expect(result.details.outputPath.startsWith(tmpdir())).toBe(true);
     expect(result.details.temporary).toBe(true);
@@ -301,7 +304,190 @@ describe("readFullFetchContent file exports", () => {
   });
 });
 
-describe("registerFetchRetrieval store retention", () => {
+describe("registerFetchRetrieval replay recovery", () => {
+  it("replays evicted refs for inline reads, rebuilds the cache under the same ref, and reports servedFrom", async () => {
+    const store = createFetchRetrievalStore();
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content",
+      links: ["https://example.com/replay"],
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const replayed = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayed).toMatchObject({
+      mode: "inline",
+      text: "Replay content",
+      details: {
+        mode: "inline",
+        target: "fetch",
+        section: "content",
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, undefined);
+
+    const cached = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(cached).toMatchObject({
+      mode: "inline",
+      text: "Replay content",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays evicted refs for file exports and preserves existing export behavior", async () => {
+    const store = createFetchRetrievalStore();
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay file body",
+      links: ["https://example.com/replay"],
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    const result = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+      mode: "file",
+      outputPath: "/workspace/project/export.txt",
+    });
+
+    expect(result).toMatchObject({
+      mode: "file",
+      details: {
+        mode: "file",
+        target: "fetch",
+        section: "content",
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+        outputPath: "/workspace/project/export.txt",
+        charsWritten: "Replay file body".length,
+        temporary: false,
+        overwritten: false,
+      },
+    });
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/workspace/project/export.txt",
+      "Replay file body",
+      expect.objectContaining({ encoding: "utf8", flag: "wx" }),
+    );
+  });
+
+  it("includes cache-miss and replay-failure context when fetch replay fails", async () => {
+    const store = createFetchRetrievalStore();
+    const replayFetch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(`No stored full content found for ref: ${original.fullContentRef}. Replay failed: upstream unavailable`);
+  });
+
+  it("forwards abort signals to fetch replay and preserves AbortError", async () => {
+    const store = createFetchRetrievalStore();
+    const controller = new AbortController();
+    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      throw new DOMException("Aborted", "AbortError");
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Evictor",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/evictor"],
+    });
+
+    controller.abort();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, controller.signal);
+  });
+
   it("issues unique refs for identical payloads", async () => {
     const payload = {
       title: "same title",

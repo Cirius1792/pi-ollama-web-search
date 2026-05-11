@@ -2,13 +2,18 @@ import { fetchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, type OllamaSearchConfig } from "./config.js";
 import { formatFetchResultWithMetadata, type FetchTruncationMetadata } from "./format.js";
 import { normalizeWebFetchResponse, type NormalizedFetchResponse } from "./normalize.js";
-import { registerFetchRetrieval as registerFetchRetrievalDefault, type FetchRetrievalRecord } from "./retrieval.js";
+import {
+  registerFetchRetrieval as registerFetchRetrievalDefault,
+  type FetchRetrievalRecord,
+  type FetchReplayInput,
+  type RegisterFetchRetrievalReplay,
+} from "./retrieval.js";
 
 export interface RunOllamaWebFetchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-  registerFetchRetrieval?: (payload: NormalizedFetchResponse) => FetchRetrievalRecord;
+  registerFetchRetrieval?: (payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay) => FetchRetrievalRecord;
 }
 
 export interface FetchResultDetails extends FetchRetrievalRecord {
@@ -32,16 +37,30 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
     throw new Error(getMissingApiKeyMessage());
   }
 
+  const apiKey = options.config.apiKey;
+
   const raw = await fetchOllamaWeb({
     endpoint: options.config.fetchEndpoint,
-    apiKey: options.config.apiKey,
+    apiKey,
     url: trimmedUrl,
     signal: options.signal,
     fetchImpl: options.fetchImpl,
   });
 
   const registerFetchRetrieval = options.registerFetchRetrieval ?? registerFetchRetrievalDefault;
-  const normalized = registerFetchRetrieval(normalizeWebFetchResponse(raw));
+  const normalizedPayload = normalizeWebFetchResponse(raw);
+  const replay: RegisterFetchRetrievalReplay = {
+    url: trimmedUrl,
+    replayFetch: async (replayInput: FetchReplayInput, signal?: AbortSignal) =>
+      fetchOllamaWeb({
+        endpoint: options.config.fetchEndpoint,
+        apiKey,
+        url: replayInput.url,
+        signal,
+        fetchImpl: options.fetchImpl,
+      }),
+  };
+  const normalized = registerFetchRetrieval(normalizedPayload, replay);
   const formattedResult = formatFetchResultWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,
     fullContentRef: normalized.fullContentRef,
