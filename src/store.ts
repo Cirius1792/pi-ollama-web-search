@@ -284,7 +284,12 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
       throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`);
     }
 
-    const remappedPayload = remapReplayPayloadByIdentity(replayedPayload, metadata);
+    let remappedPayload: NormalizedSearchResponse;
+    try {
+      remappedPayload = remapReplayPayloadByIdentity(replayedPayload, metadata);
+    } catch (error) {
+      throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`);
+    }
 
     cachePayload({
       ref: metadata.ref,
