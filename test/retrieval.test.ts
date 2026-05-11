@@ -301,6 +301,146 @@ describe("readFullFetchContent file exports", () => {
   });
 });
 
+describe("readFullFetchContent replay recovery", () => {
+  it("replays payload on cache miss and returns servedFrom replay with same ref", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    const result = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(result.mode).toBe("inline");
+    if (result.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(result.text).toBe("Replayed content");
+    expect(result.details.fullContentRef).toBe(replayable.fullContentRef);
+    expect(result.details.servedFrom).toBe("replay");
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/source", signal: undefined });
+
+    const cached = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(cached.mode).toBe("inline");
+    if (cached.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(cached.text).toBe("Replayed content");
+    expect(cached.details.servedFrom).toBe("cache");
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns combined cache-miss envelope when replay also fails", async () => {
+    const replayFetch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: replayable.fullContentRef,
+        section: "content",
+      }),
+    ).rejects.toThrow(
+      `No stored full content found for ref: ${replayable.fullContentRef}. Replay also failed: upstream unavailable`,
+    );
+  });
+
+  it("rebuilds payload for file mode reads after replay", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replayed title",
+      content: "Replayed content",
+      links: ["https://example.com/replayed"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+    const replayable = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      { sourceUrl: "https://example.com/source" },
+    );
+
+    store.registerFetchRetrieval({
+      title: "Oversized",
+      content: "x".repeat(FETCH_RETRIEVAL_STORE_MAX_BYTES + 10_000),
+      links: ["https://example.com/oversized"],
+    });
+
+    const fileResult = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+      mode: "file",
+      outputPath: "/workspace/project/replayed.txt",
+    });
+
+    expect(fileResult.mode).toBe("file");
+    if (fileResult.mode !== "file") {
+      throw new Error("Expected file mode result");
+    }
+
+    expect(fileResult.details.fullContentRef).toBe(replayable.fullContentRef);
+    expect(fileResult.details.servedFrom).toBe("replay");
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/workspace/project/replayed.txt",
+      "Replayed content",
+      expect.objectContaining({ encoding: "utf8", flag: "wx" }),
+    );
+
+    const cachedInline = await store.readFullFetchContent({
+      fullContentRef: replayable.fullContentRef,
+      section: "content",
+    });
+
+    expect(cachedInline.mode).toBe("inline");
+    if (cachedInline.mode !== "inline") {
+      throw new Error("Expected inline mode result");
+    }
+
+    expect(cachedInline.details.servedFrom).toBe("cache");
+    expect(cachedInline.text).toBe("Replayed content");
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("registerFetchRetrieval store retention", () => {
   it("issues unique refs for identical payloads", async () => {
     const payload = {

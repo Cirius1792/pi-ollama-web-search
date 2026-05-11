@@ -11,6 +11,7 @@ function createReadFullFetchStub() {
       target: "fetch" as const,
       section: "content" as const,
       fullContentRef: "fetch:test",
+      servedFrom: "cache" as const,
       offset: 0,
       totalChars: 12,
       returnedChars: 12,
