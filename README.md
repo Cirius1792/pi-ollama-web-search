@@ -26,6 +26,7 @@ Tool behavior:
     - If `path` is omitted, the tool writes to a generated temp file outside the repo and deletes it at session shutdown.
     - If `path` is provided, the tool resolves it like pi file tools (relative to the current working directory, absolute paths allowed, leading `@` tolerated), creates parent directories automatically, and refuses to overwrite unless `overwrite: true` is passed.
     - `outputPath` is still accepted as a backward-compatible alias, but `path` is canonical.
+  - Replay behavior is best-effort: when an in-memory payload cache entry is evicted, read-full attempts to rebuild from the original query/URL while keeping the same ref, but replay can fail if upstream results can no longer reconstruct the original occurrence ordering.
 
 ## Install
 
