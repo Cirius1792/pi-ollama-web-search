@@ -81,7 +81,7 @@ describe("extension", () => {
     );
   });
 
-  it("fetch + read-full retrieval path supports inline and file modes", async () => {
+  it("fetch + read-full retrieval path supports inline, explicit file export, and temp file export modes", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
     const fetchImpl = vi
@@ -134,26 +134,37 @@ describe("extension", () => {
     expect(inlineLinksResult?.details?.mode).toBe("inline");
     expect(inlineLinksResult?.details?.section).toBe("links");
 
-    const outputDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-"));
-    let generatedOutputPath: string | undefined;
+    const workspaceDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-workspace-"));
+    let tempOutputPath: string | undefined;
     try {
-      const requestedOutputPath = join(outputDir, "title.txt");
       const fileResult = await readFullTool?.execute(
         "call-3",
-        { ref: fullContentRef, section: "title", mode: "file", outputPath: requestedOutputPath },
+        { ref: fullContentRef, section: "title", mode: "file", path: "@exports/title.txt" },
+        new AbortController().signal,
+        undefined,
+        { cwd: workspaceDir },
+      );
+
+      expect(fileResult?.content?.[0]?.text).toContain("Wrote full section to");
+      expect(fileResult?.content?.[0]?.text).toContain("Delete this file when you no longer need it.");
+      expect(fileResult?.details?.mode).toBe("file");
+      expect(fileResult?.details?.temporary).toBe(false);
+      expect(fileResult?.details?.outputPath).toBe(join(workspaceDir, "exports/title.txt"));
+      expect(await readFile(fileResult?.details?.outputPath, "utf8")).toBe("Example title");
+
+      const tempFileResult = await readFullTool?.execute(
+        "call-4",
+        { ref: fullContentRef, section: "content", mode: "file" },
         new AbortController().signal,
       );
 
-      generatedOutputPath = fileResult?.details?.outputPath;
-
-      expect(fileResult?.content?.[0]?.text).toContain("Wrote full section to");
-      expect(fileResult?.details?.mode).toBe("file");
-      expect(fileResult?.details?.outputPath).not.toBe(requestedOutputPath);
-      expect(await readFile(fileResult?.details?.outputPath, "utf8")).toBe("Example title");
+      tempOutputPath = tempFileResult?.details?.outputPath;
+      expect(tempFileResult?.details?.temporary).toBe(true);
+      expect(await readFile(tempFileResult?.details?.outputPath, "utf8")).toBe("Long content body");
     } finally {
-      await rm(outputDir, { recursive: true, force: true });
-      if (generatedOutputPath) {
-        await rm(generatedOutputPath, { force: true });
+      await rm(workspaceDir, { recursive: true, force: true });
+      if (tempOutputPath) {
+        await rm(tempOutputPath, { force: true });
       }
     }
   });
@@ -190,6 +201,53 @@ describe("extension", () => {
     await expect(readFullTool?.execute("call-2", { ref: fullContentRef, section: "content" }, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
+  });
+
+  it("validates fetch-specific read-full parameter combinations", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            title: "Example title",
+            content: "Long content body",
+            links: ["https://example.com/a"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-fetch", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    await expect(
+      readFullTool?.execute("call-fetch-result-index", { ref: fullContentRef, section: "content", resultIndex: 1 }, new AbortController().signal),
+    ).rejects.toThrow("resultIndex is not supported for fetch refs.");
+
+    await expect(
+      readFullTool?.execute("call-fetch-path-inline", { ref: fullContentRef, section: "content", path: "@exports/content.txt" }, new AbortController().signal),
+    ).rejects.toThrow("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
+
+    await expect(
+      readFullTool?.execute("call-fetch-overwrite-inline", { ref: fullContentRef, section: "content", overwrite: true }, new AbortController().signal),
+    ).rejects.toThrow("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
+
+    await expect(
+      readFullTool?.execute(
+        "call-fetch-conflicting-paths",
+        { ref: fullContentRef, section: "content", mode: "file", path: "a.txt", outputPath: "b.txt" },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("path and outputPath must match when both are provided.");
   });
 
   it("returns search retrieval metadata and reads title/url/content through ollama_web_read_full", async () => {
@@ -292,6 +350,14 @@ describe("extension", () => {
     );
 
     await expect(
+      readFullTool!.execute("tool-search-path", { ref, section: "content", resultIndex: 1, path: "@exports/content.txt" }, undefined),
+    ).rejects.toThrow("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
+
+    await expect(
+      readFullTool!.execute("tool-search-overwrite", { ref, section: "content", resultIndex: 1, overwrite: true }, undefined),
+    ).rejects.toThrow("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
+
+    await expect(
       readFullTool!.execute("tool-bad-ref", { ref: "ws_s_missing", section: "content", resultIndex: 1 }, undefined),
     ).rejects.toThrow("No stored content found for ref ws_s_missing.");
   });
@@ -347,7 +413,12 @@ describe("extension", () => {
     expect(readFullTool).toBeDefined();
     expect(readFullTool?.description).toContain("search or web fetch");
     expect(readFullTool?.promptGuidelines?.join(" ")).toContain("ollama_web_search or ollama_web_fetch");
+    expect(readFullTool?.promptGuidelines?.join(" ")).toContain(
+      "When using ollama_web_read_full with an explicit export path, delete explicit export files when you no longer need them.",
+    );
     expect(readFullTool?.parameters?.properties?.ref?.description).toContain("ollama_web_search or ollama_web_fetch");
+    expect(readFullTool?.parameters?.properties?.path?.description).toContain("generated temp file");
+    expect(readFullTool?.parameters?.properties?.outputPath?.description).toContain("Deprecated alias for path");
 
     const sectionOptions = readFullTool?.parameters?.properties?.section?.anyOf ?? [];
     const sectionLiterals = sectionOptions.map((option: { const?: string }) => option.const).filter(Boolean);
@@ -356,6 +427,7 @@ describe("extension", () => {
     expect(readFullTool?.parameters?.properties?.mode?.anyOf?.map((option: { const?: string }) => option.const)).toEqual(
       expect.arrayContaining(["inline", "file"]),
     );
+    expect(readFullTool?.parameters?.properties?.overwrite?.type).toBe("boolean");
     expect(readFullTool?.parameters?.properties?.resultIndex?.type).toBe("integer");
     expect(readFullTool?.parameters?.properties?.offset?.minimum).toBe(0);
     expect(readFullTool?.parameters?.properties?.maxChars?.minimum).toBe(1);
@@ -390,6 +462,55 @@ describe("extension", () => {
     );
   });
 
+
+  it("deletes temporary fetch exports on session_shutdown but leaves explicit exports in place", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({ title: "Example", content: "Body", links: ["https://example.com/a"] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-1", { url: "https://example.com" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    const workspaceDir = await mkdtemp(join(tmpdir(), "pi-ollama-web-search-persist-"));
+    try {
+      const persistentResult = await readFullTool?.execute(
+        "call-persistent",
+        { ref: fullContentRef, section: "title", mode: "file", path: "saved/title.txt" },
+        new AbortController().signal,
+        undefined,
+        { cwd: workspaceDir },
+      );
+      const temporaryResult = await readFullTool?.execute(
+        "call-temp",
+        { ref: fullContentRef, section: "content", mode: "file" },
+        new AbortController().signal,
+      );
+
+      expect(await readFile(persistentResult?.details?.outputPath, "utf8")).toBe("Example");
+      expect(await readFile(temporaryResult?.details?.outputPath, "utf8")).toBe("Body");
+
+      await fake.handlers.session_shutdown({}, { hasUI: false, ui: { notify: vi.fn() } });
+
+      expect(await readFile(persistentResult?.details?.outputPath, "utf8")).toBe("Example");
+      await expect(readFile(temporaryResult?.details?.outputPath, "utf8")).rejects.toThrow();
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
 
   it("isolates fetch retrieval refs between extension instances", async () => {
     process.env.OLLAMA_API_KEY = "test-key";

@@ -1,7 +1,8 @@
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { NormalizedFetchResponse } from "./normalize.js";
 
 export const FETCH_RETRIEVAL_SECTIONS = ["title", "content", "links"] as const;
@@ -35,6 +36,8 @@ export interface ReadFullFetchParams {
   offset?: number;
   maxChars?: number;
   outputPath?: string;
+  overwrite?: boolean;
+  cwd?: string;
   signal?: AbortSignal;
 }
 
@@ -62,6 +65,8 @@ export interface ReadFullFileResult {
     fullContentRef: string;
     outputPath: string;
     charsWritten: number;
+    temporary: boolean;
+    overwritten: boolean;
   };
 }
 
@@ -69,6 +74,8 @@ export type ReadFullFetchResult = ReadFullInlineResult | ReadFullFileResult;
 
 export const FETCH_RETRIEVAL_STORE_MAX_ENTRIES = 256;
 export const FETCH_RETRIEVAL_STORE_MAX_BYTES = 1_000_000;
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
 interface StoredFetchPayload {
   payload: NormalizedFetchResponse;
@@ -78,6 +85,7 @@ interface StoredFetchPayload {
 export interface FetchRetrievalStore {
   registerFetchRetrieval(payload: NormalizedFetchResponse): FetchRetrievalRecord;
   clearFetchRetrievalStore(): void;
+  cleanupTemporaryExports(): Promise<void>;
   readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult>;
 }
 
@@ -107,9 +115,47 @@ function validatePositiveInteger(name: string, value: number): void {
   }
 }
 
+function normalizeOutputPath(rawPath: string): string {
+  const normalizedSpaces = rawPath.replace(UNICODE_SPACES, " ");
+  const withoutAtPrefix = normalizedSpaces.startsWith("@") ? normalizedSpaces.slice(1) : normalizedSpaces;
+
+  if (withoutAtPrefix === "~") {
+    return homedir();
+  }
+
+  if (withoutAtPrefix.startsWith("~/")) {
+    return join(homedir(), withoutAtPrefix.slice(2));
+  }
+
+  return withoutAtPrefix;
+}
+
+function resolveOutputPath(outputPath: string, cwd: string): string {
+  const normalized = normalizeOutputPath(outputPath);
+  if (isAbsolute(normalized)) {
+    return normalized;
+  }
+  return resolve(cwd, normalized);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export function createFetchRetrievalStore(): FetchRetrievalStore {
   const fetchRetrievalStore = new Map<string, StoredFetchPayload>();
   let fetchRetrievalStoreBytes = 0;
+  const temporaryExportRoot = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}`);
+  let hasTemporaryExports = false;
 
   function evictOldestFetchRecord(): void {
     const oldestRef = fetchRetrievalStore.keys().next().value;
@@ -180,6 +226,15 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
     fetchRetrievalStoreBytes = 0;
   }
 
+  async function cleanupTemporaryExports(): Promise<void> {
+    if (!hasTemporaryExports) {
+      return;
+    }
+
+    await rm(temporaryExportRoot, { recursive: true, force: true });
+    hasTemporaryExports = false;
+  }
+
   async function readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult> {
     params.signal?.throwIfAborted();
 
@@ -188,12 +243,36 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
     const mode = params.mode ?? "inline";
 
     if (mode === "file") {
-      const outputPath = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}-${params.section}.txt`);
+      const hasExplicitOutputPath = typeof params.outputPath === "string" && params.outputPath.trim().length > 0;
+      const outputPath = hasExplicitOutputPath
+        ? resolveOutputPath(params.outputPath!.trim(), params.cwd ?? process.cwd())
+        : join(temporaryExportRoot, `${randomBytes(12).toString("hex")}-${params.section}.txt`);
 
-      params.signal?.throwIfAborted();
-      await mkdir(dirname(outputPath), { recursive: true });
-      params.signal?.throwIfAborted();
-      await writeFile(outputPath, sectionText, { encoding: "utf8", signal: params.signal });
+      let overwritten = false;
+
+      if (!hasExplicitOutputPath) {
+        hasTemporaryExports = true;
+      }
+
+      await withFileMutationQueue(outputPath, async () => {
+        params.signal?.throwIfAborted();
+
+        if (hasExplicitOutputPath) {
+          const exists = await pathExists(outputPath);
+          if (exists && !params.overwrite) {
+            throw new Error(`File already exists: ${outputPath}. Pass overwrite=true to replace it.`);
+          }
+          overwritten = exists && params.overwrite === true;
+        }
+
+        await mkdir(dirname(outputPath), { recursive: true });
+        params.signal?.throwIfAborted();
+        await writeFile(outputPath, sectionText, {
+          encoding: "utf8",
+          flag: hasExplicitOutputPath ? (params.overwrite ? "w" : "wx") : "w",
+          signal: params.signal,
+        });
+      });
 
       return {
         mode: "file",
@@ -204,6 +283,8 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
           fullContentRef: params.fullContentRef,
           outputPath,
           charsWritten: sectionText.length,
+          temporary: !hasExplicitOutputPath,
+          overwritten,
         },
       };
     }
@@ -236,6 +317,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
   return {
     registerFetchRetrieval,
     clearFetchRetrievalStore,
+    cleanupTemporaryExports,
     readFullFetchContent,
   };
 }
@@ -244,4 +326,5 @@ const defaultFetchRetrievalStore = createFetchRetrievalStore();
 
 export const registerFetchRetrieval = defaultFetchRetrievalStore.registerFetchRetrieval;
 export const clearFetchRetrievalStore = defaultFetchRetrievalStore.clearFetchRetrievalStore;
+export const cleanupTemporaryExports = defaultFetchRetrievalStore.cleanupTemporaryExports;
 export const readFullFetchContent = defaultFetchRetrievalStore.readFullFetchContent;
