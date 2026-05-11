@@ -23,7 +23,10 @@ export interface RunOllamaWebReadFullInput {
   mode?: "inline" | "file";
   offset?: number;
   maxChars?: number;
+  path?: string;
   outputPath?: string;
+  overwrite?: boolean;
+  cwd?: string;
   signal?: AbortSignal;
 }
 
@@ -76,6 +79,14 @@ function validateInlineIntegerInput(name: string, value: number | undefined, min
   }
 }
 
+function resolveExportPath(input: RunOllamaWebReadFullInput): string | undefined {
+  if (input.path !== undefined && input.outputPath !== undefined && input.path !== input.outputPath) {
+    throw new Error("path and outputPath must match when both are provided.");
+  }
+
+  return input.path ?? input.outputPath;
+}
+
 export async function runOllamaWebReadFull(
   input: RunOllamaWebReadFullInput,
   options: {
@@ -88,7 +99,17 @@ export async function runOllamaWebReadFull(
   validateInlineIntegerInput("Offset", input.offset, 0);
   validateInlineIntegerInput("maxChars", input.maxChars, 1);
 
+  const exportPath = resolveExportPath(input);
+
   if (ref.startsWith("fetch:")) {
+    if (input.resultIndex !== undefined) {
+      throw new Error("resultIndex is not supported for fetch refs.");
+    }
+
+    if (input.mode !== "file" && (exportPath !== undefined || input.overwrite !== undefined)) {
+      throw new Error("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
+    }
+
     const section = input.section ?? "content";
     if (!isFetchReadFullSection(section)) {
       throw new Error("section must be one of: title, content, links.");
@@ -100,7 +121,9 @@ export async function runOllamaWebReadFull(
       mode: input.mode,
       offset: input.offset,
       maxChars: input.maxChars,
-      outputPath: input.outputPath,
+      outputPath: exportPath,
+      overwrite: input.overwrite,
+      cwd: input.cwd,
       signal: input.signal,
     });
 
@@ -120,6 +143,10 @@ export async function runOllamaWebReadFull(
 
   if (input.mode === "file") {
     throw new Error("mode=file is only supported for fetch refs.");
+  }
+
+  if (exportPath !== undefined || input.overwrite !== undefined) {
+    throw new Error("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
   }
 
   const section = input.section ?? "content";

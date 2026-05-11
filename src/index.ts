@@ -29,14 +29,25 @@ const ReadFullParams = Type.Object({
   resultIndex: Type.Optional(Type.Integer({ minimum: 1, description: "1-based search result index. Required for search refs." })),
   mode: Type.Optional(
     Type.Union([Type.Literal("inline"), Type.Literal("file")], {
-      description: "Read mode. file mode is supported for fetch refs and writes to a generated temp file.",
+      description:
+        "Read mode. file mode is supported for fetch refs. Omit path to write to a generated temp file cleaned up at session shutdown.",
     }),
   ),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Start offset for inline retrieval. Must be 0 or greater." })),
   maxChars: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum characters to return for inline retrieval." })),
-  outputPath: Type.Optional(
-    Type.String({ description: "Reserved for future path controls; currently ignored for fetch file mode." }),
+  path: Type.Optional(
+    Type.String({
+      description:
+        "Optional export path for fetch file mode. Supports relative or absolute paths, resolves relative paths from the current working directory, tolerates leading @, and persists until you delete it. If omitted, a generated temp file is used instead.",
+    }),
   ),
+  outputPath: Type.Optional(
+    Type.String({
+      description:
+        "Deprecated alias for path. Optional export path for fetch file mode. Prefer path for new calls.",
+    }),
+  ),
+  overwrite: Type.Optional(Type.Boolean({ description: "Allow fetch file mode to overwrite an existing explicit path. Defaults to false." })),
 });
 
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
@@ -111,13 +122,14 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use ollama_web_read_full only with refs returned by previous ollama_web_search or ollama_web_fetch calls.",
       "Search refs require resultIndex and support title/url/content sections.",
-      "Fetch refs support title/content/links and can use mode=file for temp-file output.",
+      "Fetch refs support title/content/links and can use mode=file for temp-file or explicit-path exports.",
+      "When using ollama_web_read_full with an explicit export path, delete explicit export files when you no longer need them.",
     ],
     parameters: ReadFullParams,
 
-    async execute(_toolCallId, params, signal): Promise<any> {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<any> {
       const result = await runOllamaWebReadFull(
-        { ...params, signal },
+        { ...params, cwd: ctx?.cwd, signal },
         {
           readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
           getStoredSearchContent: searchContentStore.getStoredSearchContent,
@@ -125,8 +137,12 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
       );
 
       if (result.mode === "file") {
+        const message = result.details.temporary
+          ? `Wrote full section to ${result.details.outputPath}. This temp export will be deleted at session shutdown.`
+          : `Wrote full section to ${result.details.outputPath}. Delete this file when you no longer need it.`;
+
         return {
-          content: [{ type: "text", text: `Wrote full section to ${result.details.outputPath}.` }],
+          content: [{ type: "text", text: message }],
           details: result.details,
         };
       }
@@ -196,5 +212,9 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     if (!config.apiKey && ctx.hasUI) {
       ctx.ui.notify(getMissingApiKeyMessage(), "warning");
     }
+  });
+
+  pi.on("session_shutdown", async () => {
+    await fetchRetrievalStore.cleanupTemporaryExports();
   });
 }

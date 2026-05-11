@@ -1,12 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-const { mkdirMock, writeFileMock } = vi.hoisted(() => ({
+const { accessMock, mkdirMock, rmMock, writeFileMock } = vi.hoisted(() => ({
+  accessMock: vi.fn<(...args: unknown[]) => Promise<void>>(async (..._args: unknown[]) => {}),
   mkdirMock: vi.fn<(...args: unknown[]) => Promise<void>>(async (..._args: unknown[]) => {}),
+  rmMock: vi.fn<(...args: unknown[]) => Promise<void>>(async (..._args: unknown[]) => {}),
   writeFileMock: vi.fn<(...args: unknown[]) => Promise<void>>(async (..._args: unknown[]) => {}),
 }));
 
 vi.mock("node:fs/promises", () => ({
+  access: accessMock,
   mkdir: mkdirMock,
+  rm: rmMock,
   writeFile: writeFileMock,
 }));
 
@@ -14,15 +20,24 @@ import {
   FETCH_RETRIEVAL_STORE_MAX_BYTES,
   FETCH_RETRIEVAL_STORE_MAX_ENTRIES,
   clearFetchRetrievalStore,
+  createFetchRetrievalStore,
   readFullFetchContent,
   registerFetchRetrieval,
 } from "../src/retrieval.js";
 
 beforeEach(() => {
   clearFetchRetrievalStore();
+  accessMock.mockReset();
   mkdirMock.mockReset();
+  rmMock.mockReset();
   writeFileMock.mockReset();
+  accessMock.mockImplementation(async () => {
+    const error = new Error("ENOENT") as NodeJS.ErrnoException;
+    error.code = "ENOENT";
+    throw error;
+  });
   mkdirMock.mockImplementation(async (..._args: unknown[]) => {});
+  rmMock.mockImplementation(async (..._args: unknown[]) => {});
   writeFileMock.mockImplementation(async (..._args: unknown[]) => {});
 });
 
@@ -77,34 +92,6 @@ describe("readFullFetchContent abort handling", () => {
     expect(writeFileMock).not.toHaveBeenCalled();
   });
 
-  it("writes file mode exports to a generated temp path instead of a caller-provided outputPath", async () => {
-    const record = registerFetchRetrieval({
-      title: "Example title",
-      content: "Long content",
-      links: ["https://example.com"],
-    });
-
-    const result = await readFullFetchContent({
-      fullContentRef: record.fullContentRef,
-      section: "content",
-      mode: "file",
-      outputPath: "/tmp/unsafe-user-path.txt",
-    });
-
-    expect(result.mode).toBe("file");
-    if (result.mode !== "file") {
-      throw new Error("Expected file mode result");
-    }
-
-    expect(result.details.outputPath).not.toBe("/tmp/unsafe-user-path.txt");
-    expect(mkdirMock).toHaveBeenCalledWith(expect.any(String), { recursive: true });
-    expect(writeFileMock).toHaveBeenCalledWith(
-      result.details.outputPath,
-      "Long content",
-      expect.objectContaining({ encoding: "utf8" }),
-    );
-  });
-
   it("propagates abort signal into writeFile so an in-progress write can cancel", async () => {
     const record = registerFetchRetrieval({
       title: "Example title",
@@ -143,6 +130,174 @@ describe("readFullFetchContent abort handling", () => {
         signal: controller.signal,
       }),
     ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("still cleans temporary export root after an aborted temporary write", async () => {
+    const store = createFetchRetrievalStore();
+    const record = store.registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    const controller = new AbortController();
+    writeFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const options = (args[2] as { signal?: AbortSignal } | undefined) ?? undefined;
+
+      return new Promise<void>((_resolve, reject) => {
+        if (!options?.signal) {
+          reject(new Error("Expected signal on writeFile options"));
+          return;
+        }
+
+        options.signal.addEventListener(
+          "abort",
+          () => {
+            reject(options.signal?.reason);
+          },
+          { once: true },
+        );
+
+        controller.abort();
+      });
+    });
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: record.fullContentRef,
+        section: "content",
+        mode: "file",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    await store.cleanupTemporaryExports();
+
+    expect(rmMock).toHaveBeenCalledWith(expect.stringContaining(`${tmpdir()}/pi-ollama-web-search-`), {
+      force: true,
+      recursive: true,
+    });
+  });
+});
+
+describe("readFullFetchContent file exports", () => {
+  it("resolves relative export paths from cwd, tolerates leading @, and creates parent directories", async () => {
+    const store = createFetchRetrievalStore();
+    const record = store.registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    const result = await store.readFullFetchContent({
+      fullContentRef: record.fullContentRef,
+      section: "content",
+      mode: "file",
+      cwd: "/workspace/project",
+      outputPath: "@exports/full/content.txt",
+    });
+
+    expect(result.mode).toBe("file");
+    if (result.mode !== "file") {
+      throw new Error("Expected file mode result");
+    }
+
+    expect(result.details.outputPath).toBe("/workspace/project/exports/full/content.txt");
+    expect(result.details.temporary).toBe(false);
+    expect(result.details.overwritten).toBe(false);
+    expect(mkdirMock).toHaveBeenCalledWith("/workspace/project/exports/full", { recursive: true });
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/workspace/project/exports/full/content.txt",
+      "Long content",
+      expect.objectContaining({ encoding: "utf8", flag: "wx" }),
+    );
+  });
+
+  it("refuses to overwrite an existing explicit export unless overwrite=true", async () => {
+    const store = createFetchRetrievalStore();
+    const record = store.registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    accessMock.mockResolvedValueOnce();
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: record.fullContentRef,
+        section: "content",
+        mode: "file",
+        outputPath: "/workspace/project/export.txt",
+      }),
+    ).rejects.toThrow("File already exists: /workspace/project/export.txt. Pass overwrite=true to replace it.");
+
+    expect(writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it("overwrites an existing explicit export only when overwrite=true", async () => {
+    const store = createFetchRetrievalStore();
+    const record = store.registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    accessMock.mockResolvedValueOnce();
+
+    const result = await store.readFullFetchContent({
+      fullContentRef: record.fullContentRef,
+      section: "content",
+      mode: "file",
+      outputPath: "/workspace/project/export.txt",
+      overwrite: true,
+    });
+
+    expect(result.mode).toBe("file");
+    if (result.mode !== "file") {
+      throw new Error("Expected file mode result");
+    }
+
+    expect(result.details.outputPath).toBe("/workspace/project/export.txt");
+    expect(result.details.temporary).toBe(false);
+    expect(result.details.overwritten).toBe(true);
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/workspace/project/export.txt",
+      "Long content",
+      expect.objectContaining({ encoding: "utf8", flag: "w" }),
+    );
+  });
+
+  it("creates temp exports when no outputPath is provided and cleans them up on shutdown", async () => {
+    const store = createFetchRetrievalStore();
+    const record = store.registerFetchRetrieval({
+      title: "Example title",
+      content: "Long content",
+      links: ["https://example.com"],
+    });
+
+    const result = await store.readFullFetchContent({
+      fullContentRef: record.fullContentRef,
+      section: "title",
+      mode: "file",
+    });
+
+    expect(result.mode).toBe("file");
+    if (result.mode !== "file") {
+      throw new Error("Expected file mode result");
+    }
+
+    expect(result.details.outputPath).toContain("pi-ollama-web-search-");
+    expect(result.details.outputPath.startsWith(tmpdir())).toBe(true);
+    expect(result.details.temporary).toBe(true);
+    expect(result.details.overwritten).toBe(false);
+
+    await store.cleanupTemporaryExports();
+
+    expect(rmMock).toHaveBeenCalledWith(expect.stringContaining(`${tmpdir()}/pi-ollama-web-search-`), {
+      force: true,
+      recursive: true,
+    });
   });
 });
 

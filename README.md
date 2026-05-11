@@ -22,7 +22,10 @@ Tool behavior:
     - target metadata for `title`, `content`, and `links`, including visibility/truncation information.
 - `ollama_web_read_full` accepts a `ref` returned by `ollama_web_search` or `ollama_web_fetch`.
   - Search refs (`ws_s_*`) read exactly one section (`title`, `url`, or `content`) for a 1-based `resultIndex`.
-  - Fetch refs (`fetch:*`) read one section (`title`, `content`, or `links`) inline, or export the full section in `mode: "file"` to a generated temp file.
+  - Fetch refs (`fetch:*`) read one section (`title`, `content`, or `links`) inline, or export the full section in `mode: "file"`.
+    - If `path` is omitted, the tool writes to a generated temp file outside the repo and deletes it at session shutdown.
+    - If `path` is provided, the tool resolves it like pi file tools (relative to the current working directory, absolute paths allowed, leading `@` tolerated), creates parent directories automatically, and refuses to overwrite unless `overwrite: true` is passed.
+    - `outputPath` is still accepted as a backward-compatible alias, but `path` is canonical.
 
 ## Install
 
@@ -81,7 +84,11 @@ The extension includes prompt guidance so pi proactively uses tools when appropr
 3. Call `ollama_web_read_full` with:
    - `ref`: the `fullContentRef` value,
    - `section`: one of `title`, `content`, or `links`.
-4. Use `mode: "file"` when you want the full fetch section written to a generated temp file instead of returned inline.
+4. Use `mode: "file"` when you want the full fetch section written to disk instead of returned inline.
+5. Optional file-mode controls:
+   - Omit `path` to create a temporary export file that is cleaned up at session shutdown.
+   - Set `path` to keep a persistent export.
+   - Set `overwrite: true` only when you intentionally want to replace an existing explicit export file.
 
 Example prompts:
 
@@ -95,6 +102,10 @@ Fetch https://ollama.com and list the most important links from the page. If the
 
 ```text
 Fetch https://ollama.com/blog and if the content is too large, use ollama_web_read_full with the returned ref in mode=file so the full content is written to a temp file.
+```
+
+```text
+Fetch https://ollama.com/blog and export the full page content to @artifacts/ollama-blog.txt with ollama_web_read_full mode=file. If the file already exists, only overwrite it when I ask.
 ```
 
 ## Dev mode
