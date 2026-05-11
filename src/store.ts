@@ -126,10 +126,7 @@ function replayIdentityKey(identity: ReplaySearchIdentity): string {
   return `${identity.url}\u0000${String(identity.occurrence)}`;
 }
 
-function remapReplayPayloadByIdentity(
-  replayedPayload: NormalizedSearchResponse,
-  metadata: StoredSearchReplayMetadata,
-): NormalizedSearchResponse {
+function buildReplayLookup(replayedPayload: NormalizedSearchResponse): Map<string, NormalizedSearchResult> {
   const replayLookup = new Map<string, NormalizedSearchResult>();
   const replayUrlOccurrences = new Map<string, number>();
 
@@ -138,6 +135,15 @@ function remapReplayPayloadByIdentity(
     replayUrlOccurrences.set(result.url, nextOccurrence);
     replayLookup.set(replayIdentityKey({ url: result.url, occurrence: nextOccurrence }), result);
   }
+
+  return replayLookup;
+}
+
+function remapReplayPayloadByIdentity(
+  replayedPayload: NormalizedSearchResponse,
+  metadata: StoredSearchReplayMetadata,
+): NormalizedSearchResponse {
+  const replayLookup = buildReplayLookup(replayedPayload);
 
   const remappedResults = metadata.resultIdentities.map((identity, index) => {
     const replayedResult = replayLookup.get(replayIdentityKey(identity));
@@ -178,6 +184,18 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
 
     retainedBytes -= existing.retainedBytes;
     payloadCache.delete(ref);
+  }
+
+  function touchCachedPayload(ref: string): StoredCacheEntry | undefined {
+    const existing = payloadCache.get(ref);
+    if (!existing) {
+      return undefined;
+    }
+
+    payloadCache.delete(ref);
+    payloadCache.set(ref, existing);
+
+    return existing;
   }
 
   function enforceCacheByteBudget(newestRef: string): void {
@@ -229,7 +247,7 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
   }
 
   function getStoredSearchContent(ref: string): StoredSearchContent | undefined {
-    return payloadCache.get(ref)?.value;
+    return touchCachedPayload(ref)?.value;
   }
 
   async function readSearchContent(
@@ -252,7 +270,7 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
       );
     }
 
-    const cached = payloadCache.get(input.ref)?.value;
+    const cached = touchCachedPayload(input.ref)?.value;
     if (cached) {
       const selected = cached.payload.results[input.resultIndex - 1];
       if (!selected) {
@@ -284,21 +302,27 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
       throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`);
     }
 
-    let remappedPayload: NormalizedSearchResponse;
-    try {
-      remappedPayload = remapReplayPayloadByIdentity(replayedPayload, metadata);
-    } catch (error) {
-      throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`);
+    const targetIdentity = metadata.resultIdentities[input.resultIndex - 1];
+    const replayLookup = buildReplayLookup(replayedPayload);
+    const remappedResult = replayLookup.get(replayIdentityKey(targetIdentity));
+
+    if (!remappedResult) {
+      throw new Error(
+        `No stored content found for ref ${input.ref}. Replay also failed: Unable to reconstruct original result ${String(input.resultIndex)} for URL ${targetIdentity.url} (occurrence ${String(targetIdentity.occurrence)}) during replay.`,
+      );
     }
 
-    cachePayload({
-      ref: metadata.ref,
-      query: metadata.query,
-      maxResults: metadata.maxResults,
-      payload: remappedPayload,
-    });
-
-    const remappedResult = remappedPayload.results[input.resultIndex - 1];
+    try {
+      const remappedPayload = remapReplayPayloadByIdentity(replayedPayload, metadata);
+      cachePayload({
+        ref: metadata.ref,
+        query: metadata.query,
+        maxResults: metadata.maxResults,
+        payload: remappedPayload,
+      });
+    } catch {
+      // Keep replay metadata so requested segments can still be fetched on demand.
+    }
 
     return {
       text: sliceByOffsetAndMaxChars(getSearchSectionText(remappedResult, input.section), input.offset ?? 0, input.maxChars),
@@ -312,20 +336,25 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
     };
   }
 
-  function clearSearchPayloadCache(): void {
+  function clearCachedSearchPayloads(): void {
     payloadCache.clear();
     retainedBytes = 0;
   }
 
+  function clearSearchPayloadCache(): void {
+    clearCachedSearchPayloads();
+  }
+
   function clearSearchContentStore(): void {
     replayMetadataStore.clear();
-    clearSearchPayloadCache();
+    clearCachedSearchPayloads();
   }
 
   return {
     rememberSearchContent,
     getStoredSearchContent,
     readSearchContent,
+    clearCachedSearchPayloads,
     clearSearchPayloadCache,
     clearSearchContentStore,
   };
