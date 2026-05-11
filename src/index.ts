@@ -1,11 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { searchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
 import { runOllamaWebFetch } from "./fetch.js";
+import { normalizeWebSearchResponse } from "./normalize.js";
 import { runOllamaWebReadFull } from "./read-full.js";
 import { createFetchRetrievalStore } from "./retrieval.js";
 import { formatOllamaWebError, runOllamaWebSearch } from "./search.js";
-import { createSearchContentStore } from "./store.js";
+import { createSearchContentStore, type StoredSearchReplay } from "./store.js";
 
 const SearchParams = Type.Object({
   query: Type.String({ description: "The web search query to send to Ollama." }),
@@ -54,6 +56,22 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
   const fetchRetrievalStore = createFetchRetrievalStore();
   const searchContentStore = createSearchContentStore();
+
+  const replaySearch = async (replay: StoredSearchReplay, signal?: AbortSignal) => {
+    if (!config.apiKey) {
+      throw new Error(getMissingApiKeyMessage());
+    }
+
+    const raw = await searchOllamaWeb({
+      endpoint: config.searchEndpoint,
+      apiKey: config.apiKey,
+      query: replay.query,
+      maxResults: replay.maxResults,
+      signal,
+    });
+
+    return normalizeWebSearchResponse(raw);
+  };
 
   pi.registerTool({
     name: "ollama_web_search",
@@ -134,6 +152,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
           readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
           getStoredSearchContent: searchContentStore.getStoredSearchContent,
           getStoredSearchReplay: searchContentStore.getStoredSearchReplay,
+          replaySearch,
           rememberSearchContent: searchContentStore.rememberSearchContent,
         },
       );

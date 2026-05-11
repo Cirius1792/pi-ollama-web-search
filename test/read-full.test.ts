@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { runOllamaWebReadFull } from "../src/read-full.js";
+import type { StoredSearchReplay } from "../src/store.js";
 import { createFullContentRef, createSearchContentStore } from "../src/store.js";
 
 function createReadFullFetchStub() {
@@ -141,6 +142,61 @@ describe("runOllamaWebReadFull", () => {
         },
       ),
     ).rejects.toThrow("path/outputPath and overwrite are only supported for fetch refs when mode=file.");
+  });
+
+  it("includes cache-miss and replay-failure context when injected search replay fails", async () => {
+    const ref = createFullContentRef("search");
+    const replay: StoredSearchReplay = {
+      kind: "search",
+      ref,
+      query: "test query",
+      maxResults: 5,
+      originalResultUrls: ["https://example.com/one"],
+    };
+
+    await expect(
+      runOllamaWebReadFull(
+        { ref, section: "content", resultIndex: 1 },
+        {
+          readFullFetchContent: createReadFullFetchStub(),
+          getStoredSearchContent: () => undefined,
+          getStoredSearchReplay: () => replay,
+          replaySearch: vi.fn().mockRejectedValue(new Error("upstream unavailable")),
+        },
+      ),
+    ).rejects.toThrow(`No stored content found for ref ${ref}. Replay failed: upstream unavailable`);
+  });
+
+  it("forwards abort signals to injected search replay and preserves AbortError", async () => {
+    const ref = createFullContentRef("search");
+    const replay: StoredSearchReplay = {
+      kind: "search",
+      ref,
+      query: "test query",
+      maxResults: 5,
+      originalResultUrls: ["https://example.com/one"],
+    };
+    const controller = new AbortController();
+    const replaySearch = vi.fn().mockImplementation(async (_replay: StoredSearchReplay, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      throw new DOMException("Aborted", "AbortError");
+    });
+
+    controller.abort();
+
+    await expect(
+      runOllamaWebReadFull(
+        { ref, section: "content", resultIndex: 1, signal: controller.signal },
+        {
+          readFullFetchContent: createReadFullFetchStub(),
+          getStoredSearchContent: () => undefined,
+          getStoredSearchReplay: () => replay,
+          replaySearch,
+        },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(replaySearch).toHaveBeenCalledWith(replay, controller.signal);
   });
 
   it("rejects conflicting path and outputPath values", async () => {

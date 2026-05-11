@@ -467,6 +467,63 @@ describe("extension", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("replays evicted search refs using the extension's injected config even if env changes before read-full", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [{ title: "One", url: "https://example.com/one", content: "First content" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [{ title: "Evictor", url: "https://example.com/evictor", content: "x".repeat(1_200_000) }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [{ title: "One replay", url: "https://example.com/one", content: "First content replay" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResult = await searchTool!.execute("tool-search-1", { query: "dupes" }, new AbortController().signal);
+    const ref = searchResult.details.fullContentRef;
+
+    await searchTool!.execute("tool-search-evict", { query: "evict" }, new AbortController().signal);
+    delete process.env.OLLAMA_API_KEY;
+
+    await expect(
+      readFullTool!.execute("tool-read-replayed", { ref, section: "content", resultIndex: 1 }, new AbortController().signal),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: "First content replay" }],
+      details: {
+        ref,
+        kind: "search",
+        section: "content",
+        resultIndex: 1,
+        servedFrom: "replay",
+      },
+    });
+  });
+
   it("fails clearly when the requested search replay occurrence is gone", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 

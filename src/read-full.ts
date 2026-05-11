@@ -1,6 +1,4 @@
-import { getMissingApiKeyMessage, loadConfig } from "./config.js";
-import { searchOllamaWeb } from "./client.js";
-import { normalizeWebSearchResponse, type NormalizedSearchResponse } from "./normalize.js";
+import { type NormalizedSearchResponse } from "./normalize.js";
 import { FETCH_RETRIEVAL_SECTIONS, type ReadFullFetchResult, type ReadFullFetchParams } from "./retrieval.js";
 import type { StoredSearchContent, StoredSearchReplay } from "./store.js";
 
@@ -122,6 +120,13 @@ function getOriginalSearchResultIdentity(originalResultUrls: string[], resultInd
   };
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
 function getMappedSearchResult(
   payload: NormalizedSearchResponse,
   originalResultUrls: string[],
@@ -144,29 +149,13 @@ function getMappedSearchResult(
   throw new Error(`Replay succeeded, but the original search result ${String(resultIndex)} could not be reconstructed.`);
 }
 
-async function replayStoredSearch(replay: StoredSearchReplay, signal?: AbortSignal): Promise<NormalizedSearchResponse> {
-  const config = loadConfig();
-  if (!config.apiKey) {
-    throw new Error(getMissingApiKeyMessage());
-  }
-
-  const raw = await searchOllamaWeb({
-    endpoint: config.searchEndpoint,
-    apiKey: config.apiKey,
-    query: replay.query,
-    maxResults: replay.maxResults,
-    signal,
-  });
-
-  return normalizeWebSearchResponse(raw);
-}
-
 export async function runOllamaWebReadFull(
   input: RunOllamaWebReadFullInput,
   options: {
     readFullFetchContent: (params: ReadFullFetchParams) => Promise<ReadFullFetchResult>;
     getStoredSearchContent: (ref: string) => StoredSearchContent | undefined;
     getStoredSearchReplay?: (ref: string) => StoredSearchReplay | undefined;
+    replaySearch?: (replay: StoredSearchReplay, signal?: AbortSignal) => Promise<NormalizedSearchResponse>;
     rememberSearchContent?: (input: {
       ref: string;
       query: string;
@@ -281,7 +270,21 @@ export async function runOllamaWebReadFull(
     throw new Error(`No stored content found for ref ${ref}.`);
   }
 
-  const replayed = await replayStoredSearch(replay, input.signal);
+  if (!options.replaySearch) {
+    throw new Error(`No stored content found for ref ${ref}. Replay failed: replaySearch dependency is not configured.`);
+  }
+
+  let replayed: NormalizedSearchResponse;
+  try {
+    replayed = await options.replaySearch(replay, input.signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`No stored content found for ref ${ref}. Replay failed: ${message}`);
+  }
 
   let selected: NormalizedSearchResponse["results"][number];
   try {
