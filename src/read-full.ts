@@ -106,23 +106,34 @@ function getSearchResultCount(stored: StoredSearchContent | undefined, replay: S
   return undefined;
 }
 
-function remapSearchResultIndex(originalResultUrls: string[], replayed: NormalizedSearchResponse, resultIndex: number): number {
-  const targetUrl = originalResultUrls[resultIndex - 1];
-  const targetOccurrence = originalResultUrls.slice(0, resultIndex).filter((url) => url === targetUrl).length;
+function rebuildSearchPayloadInOriginalOrder(
+  originalResultUrls: string[],
+  replayed: NormalizedSearchResponse,
+): NormalizedSearchResponse {
+  const replayedResultsByUrl = new Map<string, NormalizedSearchResponse["results"]>();
 
-  let seenOccurrences = 0;
-  for (const [index, result] of replayed.results.entries()) {
-    if (result.url !== targetUrl) {
+  for (const result of replayed.results) {
+    const matchingResults = replayedResultsByUrl.get(result.url);
+    if (matchingResults) {
+      matchingResults.push(result);
       continue;
     }
 
-    seenOccurrences += 1;
-    if (seenOccurrences === targetOccurrence) {
-      return index;
-    }
+    replayedResultsByUrl.set(result.url, [result]);
   }
 
-  throw new Error(`Replay succeeded, but the original search result ${String(resultIndex)} could not be reconstructed.`);
+  return {
+    results: originalResultUrls.map((targetUrl, index) => {
+      const matchingResults = replayedResultsByUrl.get(targetUrl);
+      const matchedResult = matchingResults?.shift();
+
+      if (!matchedResult) {
+        throw new Error(`Replay succeeded, but the original search result ${String(index + 1)} could not be reconstructed.`);
+      }
+
+      return matchedResult;
+    }),
+  };
 }
 
 async function replayStoredSearch(replay: StoredSearchReplay, signal?: AbortSignal): Promise<NormalizedSearchResponse> {
@@ -247,11 +258,11 @@ export async function runOllamaWebReadFull(
     throw new Error(`No stored content found for ref ${ref}.`);
   }
 
-  const rebuilt = await replayStoredSearch(replay, input.signal);
+  const replayed = await replayStoredSearch(replay, input.signal);
 
-  let replayedIndex: number;
+  let rebuilt: NormalizedSearchResponse;
   try {
-    replayedIndex = remapSearchResultIndex(replay.originalResultUrls, rebuilt, input.resultIndex);
+    rebuilt = rebuildSearchPayloadInOriginalOrder(replay.originalResultUrls, replayed);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`No stored content found for ref ${ref}. ${message}`);
@@ -264,7 +275,7 @@ export async function runOllamaWebReadFull(
     payload: rebuilt,
   });
 
-  const selected = rebuilt.results[replayedIndex];
+  const selected = rebuilt.results[input.resultIndex - 1];
 
   return {
     mode: "inline",

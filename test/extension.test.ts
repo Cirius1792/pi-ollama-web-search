@@ -306,46 +306,44 @@ describe("extension", () => {
     }
   });
 
-  it("replays search refs after cached payload eviction and remaps by original URL occurrence", async () => {
+  it("replays evicted search refs into original result-index order and serves later reads from cache", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({
-              results: [
-                { title: "A1", url: "https://example.com/a", content: "first a" },
-                { title: "B", url: "https://example.com/b", content: "bee" },
-                { title: "A2", url: "https://example.com/a", content: "second a" },
-              ],
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          ),
-        )
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({
-              results: [{ title: "Evictor", url: "https://example.com/evictor", content: "x".repeat(1_200_000) }],
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          ),
-        )
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({
-              results: [
-                { title: "B replay", url: "https://example.com/b", content: "bee replay" },
-                { title: "A replay 1", url: "https://example.com/a", content: "first a replay" },
-                { title: "A replay 2", url: "https://example.com/a", content: "second a replay" },
-              ],
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          ),
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { title: "A1", url: "https://example.com/a", content: "first a" },
+              { title: "B", url: "https://example.com/b", content: "bee" },
+              { title: "A2", url: "https://example.com/a", content: "second a" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
         ),
-    );
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [{ title: "Evictor", url: "https://example.com/evictor", content: "x".repeat(1_200_000) }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { title: "B replay", url: "https://example.com/b", content: "bee replay" },
+              { title: "A replay 1", url: "https://example.com/a", content: "first a replay" },
+              { title: "A replay 2", url: "https://example.com/a", content: "second a replay" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
 
     const fake = createFakePi();
     extension(fake.pi as any);
@@ -370,6 +368,21 @@ describe("extension", () => {
         servedFrom: "replay",
       },
     });
+
+    await expect(
+      readFullTool!.execute("tool-read-cached", { ref, section: "content", resultIndex: 1 }, new AbortController().signal),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: "first a replay" }],
+      details: {
+        ref,
+        kind: "search",
+        section: "content",
+        resultIndex: 1,
+        servedFrom: "cache",
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("fails clearly when search replay succeeds but the original result occurrence is gone", async () => {
