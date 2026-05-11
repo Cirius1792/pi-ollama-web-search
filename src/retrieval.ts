@@ -184,6 +184,7 @@ function isAbortError(error: unknown): boolean {
 export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = {}): FetchRetrievalStore {
   const fetchRetrievalStore = new Map<string, StoredFetchEntry>();
   const payloadLru = new Map<string, StoredFetchEntry>();
+  const inFlightReplays = new Map<string, Promise<NormalizedFetchResponse>>();
   let fetchRetrievalStoreBytes = 0;
   const temporaryExportRoot = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}`);
   let hasTemporaryExports = false;
@@ -277,15 +278,33 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       throw new Error(`No stored full content found for ref: ${ref}`);
     }
 
+    signal?.throwIfAborted();
+
     const replayFetch = entry.replay.replayFetch ?? options.replayFetch;
     if (!replayFetch) {
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: replayFetch dependency is not configured.`);
     }
 
+    let replayPromise = inFlightReplays.get(ref);
+    if (!replayPromise) {
+      replayPromise = (async () => {
+        try {
+          signal?.throwIfAborted();
+          const raw = await replayFetch({ url: entry.replay!.url }, signal);
+          signal?.throwIfAborted();
+          return normalizeWebFetchResponse(raw);
+        } finally {
+          inFlightReplays.delete(ref);
+        }
+      })();
+      inFlightReplays.set(ref, replayPromise);
+    }
+
     let payload: NormalizedFetchResponse;
     try {
-      const raw = await replayFetch({ url: entry.replay.url }, signal);
-      payload = normalizeWebFetchResponse(raw);
+      signal?.throwIfAborted();
+      payload = await replayPromise;
+      signal?.throwIfAborted();
     } catch (error) {
       if (isAbortError(error)) {
         throw error;
@@ -295,8 +314,13 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: ${message}`);
     }
 
-    storePayload(ref, entry, payload);
-    enforceFetchStoreLimit(ref);
+    if (!entry.payload) {
+      storePayload(ref, entry, payload);
+      enforceFetchStoreLimit(ref);
+    } else {
+      touchPayload(ref, entry);
+      payload = entry.payload;
+    }
 
     return { payload, servedFrom: "replay" };
   }
@@ -339,6 +363,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
   function clearFetchRetrievalStore(): void {
     fetchRetrievalStore.clear();
     payloadLru.clear();
+    inFlightReplays.clear();
     fetchRetrievalStoreBytes = 0;
   }
 
