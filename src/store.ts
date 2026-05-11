@@ -110,6 +110,15 @@ function sliceByOffsetAndMaxChars(value: string, offset: number, maxChars?: numb
   return value.slice(offset, offset + maxChars);
 }
 
+function isAbortLikeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { name?: unknown; code?: unknown };
+  return candidate.name === "AbortError" || candidate.code === "ABORT_ERR";
+}
+
 function getErrorReason(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -139,12 +148,24 @@ function buildReplayLookup(replayedPayload: NormalizedSearchResponse): Map<strin
   return replayLookup;
 }
 
+function findFirstMissingReplayIdentityIndex(
+  replayLookup: Map<string, NormalizedSearchResult>,
+  metadata: StoredSearchReplayMetadata,
+): number | undefined {
+  for (let index = 0; index < metadata.resultIdentities.length; index += 1) {
+    const identity = metadata.resultIdentities[index];
+    if (!replayLookup.has(replayIdentityKey(identity))) {
+      return index;
+    }
+  }
+
+  return undefined;
+}
+
 function remapReplayPayloadByIdentity(
-  replayedPayload: NormalizedSearchResponse,
+  replayLookup: Map<string, NormalizedSearchResult>,
   metadata: StoredSearchReplayMetadata,
 ): NormalizedSearchResponse {
-  const replayLookup = buildReplayLookup(replayedPayload);
-
   const remappedResults = metadata.resultIdentities.map((identity, index) => {
     const replayedResult = replayLookup.get(replayIdentityKey(identity));
     if (!replayedResult) {
@@ -299,6 +320,10 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
         signal: input.signal,
       });
     } catch (error) {
+      if (isAbortLikeError(error)) {
+        throw error;
+      }
+
       throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`);
     }
 
@@ -312,16 +337,15 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
       );
     }
 
-    try {
-      const remappedPayload = remapReplayPayloadByIdentity(replayedPayload, metadata);
+    const missingReplayIndex = findFirstMissingReplayIdentityIndex(replayLookup, metadata);
+    if (missingReplayIndex === undefined) {
+      const remappedPayload = remapReplayPayloadByIdentity(replayLookup, metadata);
       cachePayload({
         ref: metadata.ref,
         query: metadata.query,
         maxResults: metadata.maxResults,
         payload: remappedPayload,
       });
-    } catch {
-      // Keep replay metadata so requested segments can still be fetched on demand.
     }
 
     return {
@@ -341,10 +365,6 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
     retainedBytes = 0;
   }
 
-  function clearSearchPayloadCache(): void {
-    clearCachedSearchPayloads();
-  }
-
   function clearSearchContentStore(): void {
     replayMetadataStore.clear();
     clearCachedSearchPayloads();
@@ -355,7 +375,6 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
     getStoredSearchContent,
     readSearchContent,
     clearCachedSearchPayloads,
-    clearSearchPayloadCache,
     clearSearchContentStore,
   };
 }

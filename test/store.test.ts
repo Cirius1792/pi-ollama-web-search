@@ -91,7 +91,7 @@ describe("search content store", () => {
       },
     });
 
-    store.clearSearchPayloadCache();
+    store.clearCachedSearchPayloads();
 
     const replaySearch = vi.fn().mockResolvedValue({
       results: [
@@ -130,7 +130,7 @@ describe("search content store", () => {
       payload: createPayload("failure"),
     });
 
-    store.clearSearchPayloadCache();
+    store.clearCachedSearchPayloads();
 
     const replaySearch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
 
@@ -140,6 +140,31 @@ describe("search content store", () => {
         { replaySearch },
       ),
     ).rejects.toThrow(`No stored content found for ref ${ref}. Replay also failed: upstream unavailable`);
+  });
+
+  it("rethrows replay AbortError unchanged", async () => {
+    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const ref = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref,
+      query: "replay aborts",
+      maxResults: 2,
+      payload: createPayload("abort"),
+    });
+
+    store.clearCachedSearchPayloads();
+
+    const abortError = new Error("The operation was aborted.");
+    abortError.name = "AbortError";
+    const replaySearch = vi.fn().mockRejectedValue(abortError);
+
+    await expect(
+      store.readSearchContent(
+        { ref, resultIndex: 1, section: "content" },
+        { replaySearch },
+      ),
+    ).rejects.toBe(abortError);
   });
 
   it("returns requested replayed result when another original result is missing", async () => {
@@ -215,6 +240,64 @@ describe("search content store", () => {
     expect(store.getStoredSearchContent(firstRef)?.payload.results[0]?.url).toBe("https://example.com/one");
     expect(store.getStoredSearchContent(secondRef)).toBeUndefined();
     expect(store.getStoredSearchContent(thirdRef)?.payload.results[0]?.url).toBe("https://example.com/three");
+  });
+
+  it("throws unexpected cache remap/write failures", async () => {
+    const store = createSearchContentStore({ maxRetainedBytes: 220 });
+    const ref = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref,
+      query: "duplicate urls",
+      maxResults: 5,
+      payload: {
+        results: [
+          { title: "original-a1", url: "https://example.com/a", content: "original-a1" },
+          { title: "original-b1", url: "https://example.com/b", content: "original-b1" },
+          { title: "original-a2", url: "https://example.com/a", content: "original-a2" },
+        ],
+      },
+    });
+
+    const secondRef = createFullContentRef("search");
+    store.rememberSearchContent({
+      ref: secondRef,
+      query: "newer result",
+      maxResults: 1,
+      payload: {
+        results: [
+          {
+            title: "title-newer",
+            url: "https://example.com/newer",
+            content: "y".repeat(160),
+          },
+        ],
+      },
+    });
+
+    const replaySearch = vi.fn().mockResolvedValue((() => {
+      const circular: Record<string, unknown> = {
+        title: "replay-a1",
+        url: "https://example.com/a",
+        content: "replay-a1",
+      };
+      circular.self = circular;
+
+      return {
+        results: [
+          circular,
+          { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
+          { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
+        ],
+      };
+    })());
+
+    await expect(
+      store.readSearchContent(
+        { ref, resultIndex: 3, section: "content" },
+        { replaySearch },
+      ),
+    ).rejects.toThrow(/circular structure/i);
   });
 
   it("returns combined cache-miss and replay-failure errors when replay cannot reconstruct URL occurrences", async () => {
