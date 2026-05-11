@@ -312,52 +312,53 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
       };
     }
 
-    let replayedPayload: NormalizedSearchResponse;
     try {
-      replayedPayload = await options.replaySearch({
+      const replayedPayload = await options.replaySearch({
         query: metadata.query,
         maxResults: metadata.maxResults,
         signal: input.signal,
       });
+
+      const targetIdentity = metadata.resultIdentities[input.resultIndex - 1];
+      const replayLookup = buildReplayLookup(replayedPayload);
+      const remappedResult = replayLookup.get(replayIdentityKey(targetIdentity));
+
+      if (!remappedResult) {
+        throw new Error(
+          `Unable to reconstruct original result ${String(input.resultIndex)} for URL ${targetIdentity.url} (occurrence ${String(targetIdentity.occurrence)}) during replay.`,
+        );
+      }
+
+      const missingReplayIndex = findFirstMissingReplayIdentityIndex(replayLookup, metadata);
+      if (missingReplayIndex === undefined) {
+        const remappedPayload = remapReplayPayloadByIdentity(replayLookup, metadata);
+        cachePayload({
+          ref: metadata.ref,
+          query: metadata.query,
+          maxResults: metadata.maxResults,
+          payload: remappedPayload,
+        });
+      }
+
+      return {
+        text: sliceByOffsetAndMaxChars(getSearchSectionText(remappedResult, input.section), input.offset ?? 0, input.maxChars),
+        details: {
+          ref: input.ref,
+          kind: "search",
+          section: input.section,
+          resultIndex: input.resultIndex,
+          servedFrom: "replay",
+        },
+      };
     } catch (error) {
       if (isAbortLikeError(error)) {
         throw error;
       }
 
-      throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`);
-    }
-
-    const targetIdentity = metadata.resultIdentities[input.resultIndex - 1];
-    const replayLookup = buildReplayLookup(replayedPayload);
-    const remappedResult = replayLookup.get(replayIdentityKey(targetIdentity));
-
-    if (!remappedResult) {
-      throw new Error(
-        `No stored content found for ref ${input.ref}. Replay also failed: Unable to reconstruct original result ${String(input.resultIndex)} for URL ${targetIdentity.url} (occurrence ${String(targetIdentity.occurrence)}) during replay.`,
-      );
-    }
-
-    const missingReplayIndex = findFirstMissingReplayIdentityIndex(replayLookup, metadata);
-    if (missingReplayIndex === undefined) {
-      const remappedPayload = remapReplayPayloadByIdentity(replayLookup, metadata);
-      cachePayload({
-        ref: metadata.ref,
-        query: metadata.query,
-        maxResults: metadata.maxResults,
-        payload: remappedPayload,
+      throw new Error(`No stored content found for ref ${input.ref}. Replay also failed: ${getErrorReason(error)}`, {
+        cause: error,
       });
     }
-
-    return {
-      text: sliceByOffsetAndMaxChars(getSearchSectionText(remappedResult, input.section), input.offset ?? 0, input.maxChars),
-      details: {
-        ref: input.ref,
-        kind: "search",
-        section: input.section,
-        resultIndex: input.resultIndex,
-        servedFrom: "replay",
-      },
-    };
   }
 
   function clearCachedSearchPayloads(): void {
