@@ -366,7 +366,7 @@ describe("registerFetchRetrieval replay recovery", () => {
         servedFrom: "replay",
       },
     });
-    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, expect.any(AbortSignal));
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
 
     const cached = await store.readFullFetchContent({
       fullContentRef: original.fullContentRef,
@@ -507,13 +507,13 @@ describe("registerFetchRetrieval replay recovery", () => {
     const controller = new AbortController();
     const abortError = new DOMException("The operation was aborted.", "AbortError");
     let replaySignal: AbortSignal | undefined;
-    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
-      replaySignal = signal;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replaySignal = params.signal;
       queueMicrotask(() => {
         controller.abort();
       });
       return new Promise<never>((_resolve, reject) => {
-        signal?.addEventListener(
+        params.signal?.addEventListener(
           "abort",
           () => {
             reject(abortError);
@@ -551,7 +551,7 @@ describe("registerFetchRetrieval replay recovery", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
 
     expect(replayFetch).toHaveBeenCalledTimes(1);
-    expect(replayFetch.mock.calls[0]?.[0]).toEqual({ url: "https://example.com/original" });
+    expect(replayFetch.mock.calls[0]?.[0]).toMatchObject({ url: "https://example.com/original" });
     expect(replaySignal).toBeDefined();
     expect(replaySignal).not.toBe(controller.signal);
     expect(replaySignal?.aborted).toBe(true);
@@ -756,8 +756,8 @@ describe("registerFetchRetrieval replay recovery", () => {
     let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
     let replaySignal: AbortSignal | undefined;
     const replayFetch = vi.fn().mockImplementation(
-      async (_replay: { url: string }, signal?: AbortSignal) => {
-        replaySignal = signal;
+      async (params: { url: string; signal?: AbortSignal }) => {
+        replaySignal = params.signal;
         return new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
           resolveReplay = resolve;
         });
@@ -842,10 +842,10 @@ describe("registerFetchRetrieval replay recovery", () => {
     const abortError = new DOMException("The operation was aborted.", "AbortError");
     let replaySignal: AbortSignal | undefined;
     const replayFetch = vi.fn().mockImplementation(
-      async (_replay: { url: string }, signal?: AbortSignal) => {
-        replaySignal = signal;
+      async (params: { url: string; signal?: AbortSignal }) => {
+        replaySignal = params.signal;
         return new Promise<never>((_resolve, reject) => {
-          signal?.addEventListener(
+          params.signal?.addEventListener(
             "abort",
             () => {
               reject(abortError);
@@ -903,11 +903,11 @@ describe("registerFetchRetrieval replay recovery", () => {
     let firstReplayReject: ((reason?: unknown) => void) | undefined;
     let firstReplaySignal: AbortSignal | undefined;
     let replayAttempt = 0;
-    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
       replayAttempt += 1;
 
       if (replayAttempt === 1) {
-        firstReplaySignal = signal;
+        firstReplaySignal = params.signal;
         return new Promise<never>((_resolve, reject) => {
           firstReplayReject = reject;
         });
@@ -973,8 +973,8 @@ describe("registerFetchRetrieval replay recovery", () => {
     const abortError = new DOMException("The operation was aborted.", "AbortError");
     let replayReject: ((reason?: unknown) => void) | undefined;
     let replaySignal: AbortSignal | undefined;
-    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
-      replaySignal = signal;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replaySignal = params.signal;
       return new Promise<never>((_resolve, reject) => {
         replayReject = reject;
       });
@@ -1023,8 +1023,8 @@ describe("registerFetchRetrieval replay recovery", () => {
   it("does not repopulate cleared fetch state when an aborted replay resolves late", async () => {
     let replaySignal: AbortSignal | undefined;
     let resolveReplay: ((value: { title: string; content: string; links: string[] }) => void) | undefined;
-    const replayFetch = vi.fn().mockImplementation(async (_replay: { url: string }, signal?: AbortSignal) => {
-      replaySignal = signal;
+    const replayFetch = vi.fn().mockImplementation(async (params: { url: string; signal?: AbortSignal }) => {
+      replaySignal = params.signal;
       return new Promise<{ title: string; content: string; links: string[] }>((resolve) => {
         resolveReplay = resolve;
       });
@@ -1190,7 +1190,7 @@ describe("registerFetchRetrieval replay recovery", () => {
         servedFrom: "replay",
       },
     });
-    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, expect.any(AbortSignal));
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
 
     const cached = await store.readFullFetchContent({
       fullContentRef: original.fullContentRef,
@@ -1250,7 +1250,7 @@ describe("registerFetchRetrieval replay recovery", () => {
     });
 
     expect(replayFetch).toHaveBeenCalledTimes(1);
-    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, expect.any(AbortSignal));
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
   });
 
   it("retains replay metadata for older fetch refs even after many newer refs are registered", async () => {
@@ -1309,7 +1309,7 @@ describe("registerFetchRetrieval replay recovery", () => {
     });
 
     expect(replayFetch).toHaveBeenCalledTimes(1);
-    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, expect.any(AbortSignal));
+    expect(replayFetch).toHaveBeenCalledWith(expect.objectContaining({ url: "https://example.com/original" }));
   });
 
   it("evicts older refs after the bounded store limit is exceeded", async () => {

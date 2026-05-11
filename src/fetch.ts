@@ -5,14 +5,14 @@ import { normalizeWebFetchResponse, type NormalizedFetchResponse } from "./norma
 import {
   registerFetchRetrieval as registerFetchRetrievalDefault,
   type FetchRetrievalRecord,
-  type RegisterFetchRetrievalReplay,
+  type RegisterFetchRetrievalOptions,
 } from "./retrieval.js";
 
 export interface RunOllamaWebFetchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-  registerFetchRetrieval?: (payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay) => FetchRetrievalRecord;
+  registerFetchRetrieval?: (payload: NormalizedFetchResponse, options?: RegisterFetchRetrievalOptions) => FetchRetrievalRecord;
 }
 
 export interface FetchResultDetails extends FetchRetrievalRecord {
@@ -36,11 +36,9 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
     throw new Error(getMissingApiKeyMessage());
   }
 
-  const apiKey = options.config.apiKey;
-
   const raw = await fetchOllamaWeb({
     endpoint: options.config.fetchEndpoint,
-    apiKey,
+    apiKey: options.config.apiKey,
     url: trimmedUrl,
     signal: options.signal,
     fetchImpl: options.fetchImpl,
@@ -48,12 +46,7 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
 
   const registerFetchRetrieval = options.registerFetchRetrieval ?? registerFetchRetrievalDefault;
   const normalizedPayload = normalizeWebFetchResponse(raw);
-  const replay: RegisterFetchRetrievalReplay | undefined = options.registerFetchRetrieval
-    ? {
-        url: trimmedUrl,
-      }
-    : undefined;
-  const normalized = registerFetchRetrieval(normalizedPayload, replay);
+  const normalized = registerFetchRetrieval(normalizedPayload, { sourceUrl: trimmedUrl });
   const formattedResult = formatFetchResultWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,
     fullContentRef: normalized.fullContentRef,

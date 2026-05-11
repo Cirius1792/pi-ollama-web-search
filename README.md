@@ -29,6 +29,7 @@ Tool behavior:
   - Read-full responses include structured retrieval details.
     - `servedFrom: "cache"` means the ref was still available in memory.
     - `servedFrom: "replay"` means the extension replayed the original search or fetch request after cache loss, so the retrieved web content may have changed.
+  - Replay behavior is best-effort: the ref stays stable, but replay can still fail if upstream content changed, the original target can no longer be reconstructed, or the upstream request itself fails.
 
 ## Install
 

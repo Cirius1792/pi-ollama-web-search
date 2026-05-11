@@ -34,6 +34,11 @@ export interface FetchRetrievalRecord extends NormalizedFetchResponse {
   retrieval: FetchRetrievalMetadata;
 }
 
+export interface RegisterFetchRetrievalOptions {
+  sourceUrl?: string;
+  url?: string;
+}
+
 export interface ReadFullFetchParams {
   fullContentRef: string;
   section: FetchRetrievalSection;
@@ -88,11 +93,7 @@ export interface FetchReplayInput {
   url: string;
 }
 
-export type FetchReplayDependency = (replay: FetchReplayInput, signal?: AbortSignal) => Promise<unknown>;
-
-export interface RegisterFetchRetrievalReplay {
-  url: string;
-}
+export type FetchReplayDependency = (params: { url: string; signal?: AbortSignal }) => Promise<unknown>;
 
 export interface FetchRetrievalStoreOptions {
   replayFetch?: FetchReplayDependency;
@@ -112,7 +113,8 @@ interface InFlightFetchReplay {
 }
 
 export interface FetchRetrievalStore {
-  registerFetchRetrieval(payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay): FetchRetrievalRecord;
+  registerFetchRetrieval(payload: NormalizedFetchResponse, options?: RegisterFetchRetrievalOptions): FetchRetrievalRecord;
+  clearCachedFetchPayloads(): void;
   clearFetchRetrievalStore(): void;
   cleanupTemporaryExports(): Promise<void>;
   readFullFetchContent(params: ReadFullFetchParams): Promise<ReadFullFetchResult>;
@@ -183,7 +185,8 @@ async function pathExists(path: string): Promise<boolean> {
 function isAbortError(error: unknown): boolean {
   return (
     (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof Error && error.name === "AbortError")
+    (error instanceof Error && error.name === "AbortError") ||
+    (!!error && typeof error === "object" && (error as { code?: unknown }).code === "ABORT_ERR")
   );
 }
 
@@ -303,11 +306,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
     }
   }
 
-  function createInFlightReplay(
-    ref: string,
-    replayFetch: FetchReplayDependency,
-    replayInput: FetchReplayInput,
-  ): InFlightFetchReplay {
+  function createInFlightReplay(ref: string, replayFetch: FetchReplayDependency, replayInput: FetchReplayInput): InFlightFetchReplay {
     const controller = new AbortController();
     const replay: InFlightFetchReplay = {
       controller,
@@ -319,7 +318,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
     replay.promise = (async () => {
       try {
         controller.signal.throwIfAborted();
-        const raw = await replayFetch(replayInput, controller.signal);
+        const raw = await replayFetch({ url: replayInput.url, signal: controller.signal });
         controller.signal.throwIfAborted();
         return normalizeWebFetchResponse(raw);
       } finally {
@@ -362,7 +361,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       return { payload: entry.payload, servedFrom: "cache" };
     }
 
-    if (!entry.replay) {
+    if (!entry.replay?.url) {
       throw new Error(`No stored full content found for ref: ${ref}`);
     }
 
@@ -413,18 +412,15 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
     return { payload, servedFrom: "replay" };
   }
 
-  function registerFetchRetrieval(payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay): FetchRetrievalRecord {
+  function registerFetchRetrieval(payload: NormalizedFetchResponse, registerOptions?: RegisterFetchRetrievalOptions): FetchRetrievalRecord {
     let fullContentRef = createOpaqueFetchRef();
     while (fetchRetrievalStore.has(fullContentRef)) {
       fullContentRef = createOpaqueFetchRef();
     }
 
+    const sourceUrl = (registerOptions?.sourceUrl ?? registerOptions?.url)?.trim();
     const entry: StoredFetchEntry = {
-      replay: replay
-        ? {
-            url: replay.url,
-          }
-        : undefined,
+      replay: sourceUrl ? { url: sourceUrl } : undefined,
       retainedBytes: 0,
     };
     storePayload(fullContentRef, entry, payload);
@@ -437,7 +433,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       retrieval: {
         target: "fetch",
         sections: [...FETCH_RETRIEVAL_SECTIONS],
-        ...(replay ? { replay: { url: replay.url } } : {}),
+        ...(sourceUrl ? { replay: { url: sourceUrl } } : {}),
         targets: {
           title: { section: "title", fullContentRef },
           content: { section: "content", fullContentRef },
@@ -445,6 +441,14 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
         },
       },
     };
+  }
+
+  function clearCachedFetchPayloads(): void {
+    for (const [ref, entry] of fetchRetrievalStore) {
+      evictPayload(ref, entry);
+    }
+    payloadLru.clear();
+    fetchRetrievalStoreBytes = 0;
   }
 
   function clearFetchRetrievalStore(): void {
@@ -565,6 +569,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
 
   return {
     registerFetchRetrieval,
+    clearCachedFetchPayloads,
     clearFetchRetrievalStore,
     cleanupTemporaryExports,
     readFullFetchContent,
@@ -574,6 +579,7 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
 const defaultFetchRetrievalStore = createFetchRetrievalStore();
 
 export const registerFetchRetrieval = defaultFetchRetrievalStore.registerFetchRetrieval;
+export const clearCachedFetchPayloads = defaultFetchRetrievalStore.clearCachedFetchPayloads;
 export const clearFetchRetrievalStore = defaultFetchRetrievalStore.clearFetchRetrievalStore;
 export const cleanupTemporaryExports = defaultFetchRetrievalStore.cleanupTemporaryExports;
 export const readFullFetchContent = defaultFetchRetrievalStore.readFullFetchContent;
