@@ -105,6 +105,13 @@ interface StoredFetchEntry {
   replay?: RegisterFetchRetrievalReplay;
 }
 
+interface InFlightFetchReplay {
+  controller: AbortController;
+  promise: Promise<NormalizedFetchResponse>;
+  waiterCount: number;
+  settled: boolean;
+}
+
 export interface FetchRetrievalStore {
   registerFetchRetrieval(payload: NormalizedFetchResponse, replay?: RegisterFetchRetrievalReplay): FetchRetrievalRecord;
   clearFetchRetrievalStore(): void;
@@ -184,7 +191,7 @@ function isAbortError(error: unknown): boolean {
 export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = {}): FetchRetrievalStore {
   const fetchRetrievalStore = new Map<string, StoredFetchEntry>();
   const payloadLru = new Map<string, StoredFetchEntry>();
-  const inFlightReplays = new Map<string, Promise<NormalizedFetchResponse>>();
+  const inFlightReplays = new Map<string, InFlightFetchReplay>();
   let fetchRetrievalStoreBytes = 0;
   const temporaryExportRoot = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}`);
   let hasTemporaryExports = false;
@@ -245,6 +252,86 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
     }
   }
 
+  function releaseReplayWaiter(replay: InFlightFetchReplay): void {
+    replay.waiterCount = Math.max(0, replay.waiterCount - 1);
+    if (replay.waiterCount === 0 && !replay.settled && !replay.controller.signal.aborted) {
+      replay.controller.abort();
+    }
+  }
+
+  async function waitForReplay(replay: InFlightFetchReplay, signal?: AbortSignal): Promise<NormalizedFetchResponse> {
+    if (!signal) {
+      replay.waiterCount += 1;
+      try {
+        return await replay.promise;
+      } finally {
+        releaseReplayWaiter(replay);
+      }
+    }
+
+    signal.throwIfAborted();
+    replay.waiterCount += 1;
+
+    let removeAbortListener = () => {};
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const onAbort = () => {
+        try {
+          signal.throwIfAborted();
+        } catch (error) {
+          reject(error);
+          return;
+        }
+
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      };
+
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => {
+        signal.removeEventListener("abort", onAbort);
+      };
+    });
+
+    try {
+      return await Promise.race([replay.promise, aborted]);
+    } finally {
+      removeAbortListener();
+      releaseReplayWaiter(replay);
+    }
+  }
+
+  function createInFlightReplay(
+    ref: string,
+    replayFetch: FetchReplayDependency,
+    replayInput: FetchReplayInput,
+  ): InFlightFetchReplay {
+    const controller = new AbortController();
+    const replay: InFlightFetchReplay = {
+      controller,
+      waiterCount: 0,
+      settled: false,
+      promise: Promise.resolve(undefined as never),
+    };
+
+    replay.promise = (async () => {
+      try {
+        controller.signal.throwIfAborted();
+        const raw = await replayFetch(replayInput, controller.signal);
+        controller.signal.throwIfAborted();
+        return normalizeWebFetchResponse(raw);
+      } finally {
+        replay.settled = true;
+        inFlightReplays.delete(ref);
+      }
+    })();
+    replay.promise.catch(() => undefined);
+    return replay;
+  }
+
   function requireEntry(fullContentRef: string): { ref: string; entry: StoredFetchEntry } {
     const trimmedRef = fullContentRef.trim();
     if (!trimmedRef) {
@@ -285,25 +372,16 @@ export function createFetchRetrievalStore(options: FetchRetrievalStoreOptions = 
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: replayFetch dependency is not configured.`);
     }
 
-    let replayPromise = inFlightReplays.get(ref);
-    if (!replayPromise) {
-      replayPromise = (async () => {
-        try {
-          signal?.throwIfAborted();
-          const raw = await replayFetch({ url: entry.replay!.url }, signal);
-          signal?.throwIfAborted();
-          return normalizeWebFetchResponse(raw);
-        } finally {
-          inFlightReplays.delete(ref);
-        }
-      })();
-      inFlightReplays.set(ref, replayPromise);
+    let replay = inFlightReplays.get(ref);
+    if (!replay) {
+      replay = createInFlightReplay(ref, replayFetch, { url: entry.replay.url });
+      inFlightReplays.set(ref, replay);
     }
 
     let payload: NormalizedFetchResponse;
     try {
       signal?.throwIfAborted();
-      payload = await replayPromise;
+      payload = await waitForReplay(replay, signal);
       signal?.throwIfAborted();
     } catch (error) {
       if (isAbortError(error)) {
