@@ -19,7 +19,6 @@ vi.mock("node:fs/promises", () => ({
 import {
   FETCH_RETRIEVAL_STORE_MAX_BYTES,
   FETCH_RETRIEVAL_STORE_MAX_ENTRIES,
-  FETCH_RETRIEVAL_STORE_MAX_REFS,
   clearFetchRetrievalStore,
   createFetchRetrievalStore,
   readFullFetchContent,
@@ -657,11 +656,56 @@ describe("registerFetchRetrieval replay recovery", () => {
     expect(replayFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("evicts oldest replay metadata after the total fetch-ref cap is exceeded", async () => {
+  it("uses the store-level replay dependency when refs only retain lightweight replay metadata", async () => {
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content from store-level dependency",
+      links: ["https://example.com/replay"],
+    });
+    const store = createFetchRetrievalStore({ replayFetch });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+      },
+    );
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES; i += 1) {
+      store.registerFetchRetrieval({
+        title: `title-${i}`,
+        content: `payload-${i}`,
+        links: [`https://example.com/${i}`],
+      });
+    }
+
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: original.fullContentRef,
+        section: "content",
+      }),
+    ).resolves.toMatchObject({
+      mode: "inline",
+      text: "Replay content from store-level dependency",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, undefined);
+  });
+
+  it("retains replay metadata for older fetch refs even after many newer refs are registered", async () => {
     const store = createFetchRetrievalStore();
     const replayFetch = vi.fn().mockResolvedValue({
       title: "Replay title",
-      content: "Replay content after metadata eviction pressure",
+      content: "Replay content after metadata pressure",
       links: ["https://example.com/replay"],
     });
 
@@ -677,7 +721,7 @@ describe("registerFetchRetrieval replay recovery", () => {
       },
     );
 
-    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_REFS; i += 1) {
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES * 8; i += 1) {
       store.registerFetchRetrieval({
         title: `title-${i}`,
         content: `payload-${i}`,
@@ -690,9 +734,31 @@ describe("registerFetchRetrieval replay recovery", () => {
         fullContentRef: oldest.fullContentRef,
         section: "content",
       }),
-    ).rejects.toThrow(`No stored full content found for ref: ${oldest.fullContentRef}`);
+    ).resolves.toMatchObject({
+      mode: "inline",
+      text: "Replay content after metadata pressure",
+      details: {
+        fullContentRef: oldest.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
 
-    expect(replayFetch).not.toHaveBeenCalled();
+    await expect(
+      store.readFullFetchContent({
+        fullContentRef: oldest.fullContentRef,
+        section: "content",
+      }),
+    ).resolves.toMatchObject({
+      mode: "inline",
+      text: "Replay content after metadata pressure",
+      details: {
+        fullContentRef: oldest.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
+
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, undefined);
   });
 
   it("evicts older refs after the bounded store limit is exceeded", async () => {

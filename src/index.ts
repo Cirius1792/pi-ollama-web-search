@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { searchOllamaWeb } from "./client.js";
+import { fetchOllamaWeb, searchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
 import { runOllamaWebFetch } from "./fetch.js";
 import { normalizeWebSearchResponse } from "./normalize.js";
@@ -54,7 +54,20 @@ const ReadFullParams = Type.Object({
 
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const config = loadConfig();
-  const fetchRetrievalStore = createFetchRetrievalStore();
+  const fetchRetrievalStore = createFetchRetrievalStore({
+    replayFetch: async (replay, signal) => {
+      if (!config.apiKey) {
+        throw new Error(getMissingApiKeyMessage());
+      }
+
+      return fetchOllamaWeb({
+        endpoint: config.fetchEndpoint,
+        apiKey: config.apiKey,
+        url: replay.url,
+        signal,
+      });
+    },
+  });
   const searchContentStore = createSearchContentStore();
 
   const replaySearch = async (replay: StoredSearchReplay, signal?: AbortSignal) => {

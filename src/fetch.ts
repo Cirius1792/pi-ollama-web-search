@@ -5,7 +5,6 @@ import { normalizeWebFetchResponse, type NormalizedFetchResponse } from "./norma
 import {
   registerFetchRetrieval as registerFetchRetrievalDefault,
   type FetchRetrievalRecord,
-  type FetchReplayInput,
   type RegisterFetchRetrievalReplay,
 } from "./retrieval.js";
 
@@ -51,14 +50,6 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
   const normalizedPayload = normalizeWebFetchResponse(raw);
   const replay: RegisterFetchRetrievalReplay = {
     url: trimmedUrl,
-    replayFetch: async (replayInput: FetchReplayInput, signal?: AbortSignal) =>
-      fetchOllamaWeb({
-        endpoint: options.config.fetchEndpoint,
-        apiKey,
-        url: replayInput.url,
-        signal,
-        fetchImpl: options.fetchImpl,
-      }),
   };
   const normalized = registerFetchRetrieval(normalizedPayload, replay);
   const formattedResult = formatFetchResultWithMetadata(normalized, {
