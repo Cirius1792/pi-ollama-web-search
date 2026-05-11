@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "../src/index.js";
+import { FETCH_RETRIEVAL_STORE_MAX_ENTRIES } from "../src/retrieval.js";
 
 interface RegisteredTool {
   name: string;
@@ -313,6 +314,72 @@ describe("extension", () => {
     }
 
     expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("replays count-evicted fetch refs through the extension", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    let sawOriginalRequest = false;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { url: string };
+      const isReplay = body.url === "https://example.com/original" && sawOriginalRequest;
+      sawOriginalRequest ||= body.url === "https://example.com/original";
+      const suffix = isReplay ? "replay" : body.url.split("/").at(-1) ?? "unknown";
+
+      return new Response(
+        JSON.stringify({
+          title: `Title ${suffix}`,
+          content: isReplay ? "Replay content after count eviction" : `Content ${suffix}`,
+          links: [`https://example.com/${suffix}`],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const fetchResult = await fetchTool?.execute("call-fetch-original", { url: "https://example.com/original" }, new AbortController().signal);
+    const fullContentRef = fetchResult?.details?.fullContentRef;
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES; i += 1) {
+      await fetchTool?.execute(`call-evict-${i}`, { url: `https://example.com/${i}` }, new AbortController().signal);
+    }
+
+    const replayed = await readFullTool?.execute(
+      "call-read-count-replay",
+      { ref: fullContentRef, section: "content" },
+      new AbortController().signal,
+    );
+
+    expect(replayed).toEqual({
+      content: [{ type: "text", text: "Replay content after count eviction" }],
+      details: {
+        mode: "inline",
+        target: "fetch",
+        section: "content",
+        fullContentRef,
+        servedFrom: "replay",
+        offset: 0,
+        maxChars: undefined,
+        totalChars: "Replay content after count eviction".length,
+        returnedChars: "Replay content after count eviction".length,
+      },
+    });
+
+    const cached = await readFullTool?.execute(
+      "call-read-count-cache",
+      { ref: fullContentRef, section: "content" },
+      new AbortController().signal,
+    );
+
+    expect(cached?.details?.servedFrom).toBe("cache");
+    expect(cached?.content).toEqual([{ type: "text", text: "Replay content after count eviction" }]);
+    expect(fetchMock).toHaveBeenCalledTimes(FETCH_RETRIEVAL_STORE_MAX_ENTRIES + 2);
   });
 
   it("propagates abort signal to fetch read-full retrieval", async () => {

@@ -178,6 +178,7 @@ function isAbortError(error: unknown): boolean {
 export function createFetchRetrievalStore(): FetchRetrievalStore {
   const fetchRetrievalStore = new Map<string, StoredFetchEntry>();
   let fetchRetrievalStoreBytes = 0;
+  let fetchRetrievalStorePayloadEntries = 0;
   const temporaryExportRoot = join(tmpdir(), `pi-ollama-web-search-${randomBytes(12).toString("hex")}`);
   let hasTemporaryExports = false;
 
@@ -192,24 +193,37 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
     }
 
     fetchRetrievalStoreBytes = Math.max(0, fetchRetrievalStoreBytes - entry.retainedBytes);
+    fetchRetrievalStorePayloadEntries = Math.max(0, fetchRetrievalStorePayloadEntries - 1);
     entry.payload = undefined;
     entry.retainedBytes = 0;
   }
 
-  function evictOldestFetchRecord(): void {
-    const oldestRef = fetchRetrievalStore.keys().next().value;
-    if (!oldestRef) return;
+  function storePayload(entry: StoredFetchEntry, payload: NormalizedFetchResponse): void {
+    evictPayload(entry);
+    entry.payload = payload;
+    entry.retainedBytes = measureRetainedBytes(payload);
+    fetchRetrievalStoreBytes += entry.retainedBytes;
+    fetchRetrievalStorePayloadEntries += 1;
+  }
 
-    const removed = fetchRetrievalStore.get(oldestRef);
-    if (removed) {
-      evictPayload(removed);
+  function evictOldestPayload(retainRef?: string): boolean {
+    for (const [ref, entry] of fetchRetrievalStore) {
+      if (ref === retainRef || !entry.payload) {
+        continue;
+      }
+
+      evictPayload(entry);
+      return true;
     }
-    fetchRetrievalStore.delete(oldestRef);
+
+    return false;
   }
 
   function enforceFetchStoreLimit(retainRef?: string): void {
-    while (fetchRetrievalStore.size > FETCH_RETRIEVAL_STORE_MAX_ENTRIES) {
-      evictOldestFetchRecord();
+    while (fetchRetrievalStorePayloadEntries > FETCH_RETRIEVAL_STORE_MAX_ENTRIES) {
+      if (!evictOldestPayload(retainRef)) {
+        break;
+      }
     }
 
     if (fetchRetrievalStoreBytes <= FETCH_RETRIEVAL_STORE_MAX_BYTES) {
@@ -278,10 +292,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       throw new Error(`No stored full content found for ref: ${ref}. Replay failed: ${message}`);
     }
 
-    evictPayload(entry);
-    entry.payload = payload;
-    entry.retainedBytes = measureRetainedBytes(payload);
-    fetchRetrievalStoreBytes += entry.retainedBytes;
+    storePayload(entry, payload);
     touchEntry(ref, entry);
     enforceFetchStoreLimit(ref);
 
@@ -294,9 +305,9 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
       fullContentRef = createOpaqueFetchRef();
     }
 
-    const retainedBytes = measureRetainedBytes(payload);
-    fetchRetrievalStore.set(fullContentRef, { payload, retainedBytes, replay });
-    fetchRetrievalStoreBytes += retainedBytes;
+    const entry: StoredFetchEntry = { replay, retainedBytes: 0 };
+    storePayload(entry, payload);
+    fetchRetrievalStore.set(fullContentRef, entry);
     enforceFetchStoreLimit(fullContentRef);
 
     return {
@@ -318,6 +329,7 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
   function clearFetchRetrievalStore(): void {
     fetchRetrievalStore.clear();
     fetchRetrievalStoreBytes = 0;
+    fetchRetrievalStorePayloadEntries = 0;
   }
 
   async function cleanupTemporaryExports(): Promise<void> {

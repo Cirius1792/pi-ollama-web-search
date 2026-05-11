@@ -597,6 +597,65 @@ describe("registerFetchRetrieval replay recovery", () => {
     ).rejects.toThrow(`No stored full content found for ref: ${oldest.fullContentRef}`);
   });
 
+  it("replays refs after count-based payload eviction and rebuilds the cache under the same ref", async () => {
+    const store = createFetchRetrievalStore();
+    const replayFetch = vi.fn().mockResolvedValue({
+      title: "Replay title",
+      content: "Replay content after count eviction",
+      links: ["https://example.com/replay"],
+    });
+
+    const original = store.registerFetchRetrieval(
+      {
+        title: "Original title",
+        content: "Original content",
+        links: ["https://example.com/original"],
+      },
+      {
+        url: "https://example.com/original",
+        replayFetch,
+      },
+    );
+
+    for (let i = 1; i <= FETCH_RETRIEVAL_STORE_MAX_ENTRIES; i += 1) {
+      store.registerFetchRetrieval({
+        title: `title-${i}`,
+        content: `payload-${i}`,
+        links: [`https://example.com/${i}`],
+      });
+    }
+
+    const replayed = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(replayed).toMatchObject({
+      mode: "inline",
+      text: "Replay content after count eviction",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "replay",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledWith({ url: "https://example.com/original" }, undefined);
+
+    const cached = await store.readFullFetchContent({
+      fullContentRef: original.fullContentRef,
+      section: "content",
+    });
+
+    expect(cached).toMatchObject({
+      mode: "inline",
+      text: "Replay content after count eviction",
+      details: {
+        fullContentRef: original.fullContentRef,
+        servedFrom: "cache",
+      },
+    });
+    expect(replayFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("evicts older refs after the bounded store limit is exceeded", async () => {
     const oldest = registerFetchRetrieval({
       title: "oldest",
