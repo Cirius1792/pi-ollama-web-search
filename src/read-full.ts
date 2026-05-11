@@ -1,5 +1,8 @@
+import { getMissingApiKeyMessage, loadConfig } from "./config.js";
+import { searchOllamaWeb } from "./client.js";
+import { normalizeWebSearchResponse, type NormalizedSearchResponse } from "./normalize.js";
 import { FETCH_RETRIEVAL_SECTIONS, type ReadFullFetchResult, type ReadFullFetchParams } from "./retrieval.js";
-import type { StoredSearchContent } from "./store.js";
+import type { StoredSearchContent, StoredSearchReplay } from "./store.js";
 
 export type ReadFullSearchSection = "title" | "url" | "content";
 export type ReadFullFetchSection = (typeof FETCH_RETRIEVAL_SECTIONS)[number];
@@ -42,7 +45,7 @@ export interface RunOllamaWebReadFullInlineResult {
         kind: "search";
         section: ReadFullSearchSection;
         resultIndex: number;
-        servedFrom: "cache";
+        servedFrom: "cache" | "replay";
       }
     | FetchInlineDetails;
 }
@@ -87,11 +90,65 @@ function resolveExportPath(input: RunOllamaWebReadFullInput): string | undefined
   return input.path ?? input.outputPath;
 }
 
+function getSearchResultText(result: NormalizedSearchResponse["results"][number], section: ReadFullSearchSection): string {
+  return section === "title" ? result.title : section === "url" ? result.url : result.content;
+}
+
+function getSearchResultCount(stored: StoredSearchContent | undefined, replay: StoredSearchReplay | undefined): number | undefined {
+  if (stored) {
+    return stored.payload.results.length;
+  }
+
+  if (replay) {
+    return replay.originalResultUrls.length;
+  }
+
+  return undefined;
+}
+
+function remapSearchResultIndex(originalResultUrls: string[], replayed: NormalizedSearchResponse, resultIndex: number): number {
+  const targetUrl = originalResultUrls[resultIndex - 1];
+  const targetOccurrence = originalResultUrls.slice(0, resultIndex).filter((url) => url === targetUrl).length;
+
+  let seenOccurrences = 0;
+  for (const [index, result] of replayed.results.entries()) {
+    if (result.url !== targetUrl) {
+      continue;
+    }
+
+    seenOccurrences += 1;
+    if (seenOccurrences === targetOccurrence) {
+      return index;
+    }
+  }
+
+  throw new Error(`Replay succeeded, but the original search result ${String(resultIndex)} could not be reconstructed.`);
+}
+
+async function replayStoredSearch(replay: StoredSearchReplay, signal?: AbortSignal): Promise<NormalizedSearchResponse> {
+  const config = loadConfig();
+  if (!config.apiKey) {
+    throw new Error(getMissingApiKeyMessage());
+  }
+
+  const raw = await searchOllamaWeb({
+    endpoint: config.searchEndpoint,
+    apiKey: config.apiKey,
+    query: replay.query,
+    maxResults: replay.maxResults,
+    signal,
+  });
+
+  return normalizeWebSearchResponse(raw);
+}
+
 export async function runOllamaWebReadFull(
   input: RunOllamaWebReadFullInput,
   options: {
     readFullFetchContent: (params: ReadFullFetchParams) => Promise<ReadFullFetchResult>;
     getStoredSearchContent: (ref: string) => StoredSearchContent | undefined;
+    getStoredSearchReplay?: (ref: string) => StoredSearchReplay | undefined;
+    rememberSearchContent?: (input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }) => void;
   },
 ): Promise<RunOllamaWebReadFullResult> {
   const ref = getRefValue(input);
@@ -155,27 +212,27 @@ export async function runOllamaWebReadFull(
   }
 
   const stored = options.getStoredSearchContent(ref);
-  if (!stored) {
+  const replay = options.getStoredSearchReplay?.(ref);
+
+  if (input.resultIndex === undefined) {
+    throw new Error("resultIndex is required for search refs.");
+  }
+
+  const resultCount = getSearchResultCount(stored, replay);
+  if (resultCount === undefined) {
     throw new Error(`No stored content found for ref ${ref}.`);
   }
 
-  if (stored.kind === "search") {
-    if (input.resultIndex === undefined) {
-      throw new Error("resultIndex is required for search refs.");
-    }
+  if (!Number.isInteger(input.resultIndex) || input.resultIndex < 1 || input.resultIndex > resultCount) {
+    throw new Error(`Search result index ${String(input.resultIndex)} is out of range. Valid range is 1-${resultCount}.`);
+  }
 
-    if (!Number.isInteger(input.resultIndex) || input.resultIndex < 1 || input.resultIndex > stored.payload.results.length) {
-      throw new Error(
-        `Search result index ${String(input.resultIndex)} is out of range. Valid range is 1-${stored.payload.results.length}.`,
-      );
-    }
-
+  if (stored) {
     const selected = stored.payload.results[input.resultIndex - 1];
-    const text = section === "title" ? selected.title : section === "url" ? selected.url : selected.content;
 
     return {
       mode: "inline",
-      text: sliceByOffsetAndMaxChars(text, input.offset ?? 0, input.maxChars),
+      text: sliceByOffsetAndMaxChars(getSearchResultText(selected, section), input.offset ?? 0, input.maxChars),
       details: {
         ref,
         kind: "search",
@@ -186,5 +243,38 @@ export async function runOllamaWebReadFull(
     };
   }
 
-  throw new Error("Fetch refs are not supported by this retrieval instance.");
+  if (!replay) {
+    throw new Error(`No stored content found for ref ${ref}.`);
+  }
+
+  const rebuilt = await replayStoredSearch(replay, input.signal);
+
+  let replayedIndex: number;
+  try {
+    replayedIndex = remapSearchResultIndex(replay.originalResultUrls, rebuilt, input.resultIndex);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`No stored content found for ref ${ref}. ${message}`);
+  }
+
+  options.rememberSearchContent?.({
+    ref,
+    query: replay.query,
+    maxResults: replay.maxResults,
+    payload: rebuilt,
+  });
+
+  const selected = rebuilt.results[replayedIndex];
+
+  return {
+    mode: "inline",
+    text: sliceByOffsetAndMaxChars(getSearchResultText(selected, section), input.offset ?? 0, input.maxChars),
+    details: {
+      ref,
+      kind: "search",
+      section,
+      resultIndex: input.resultIndex,
+      servedFrom: "replay",
+    },
+  };
 }

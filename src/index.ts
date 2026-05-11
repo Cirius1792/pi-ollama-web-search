@@ -133,6 +133,8 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         {
           readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
           getStoredSearchContent: searchContentStore.getStoredSearchContent,
+          getStoredSearchReplay: searchContentStore.getStoredSearchReplay,
+          rememberSearchContent: searchContentStore.rememberSearchContent,
         },
       );
 

@@ -53,6 +53,11 @@ describe("runOllamaWebSearch", () => {
     expect(result.fullContentRef).toMatch(/^ws_s_/);
     expect(result.retrieval).toEqual({
       kind: "search",
+      replay: {
+        query: "what is ollama?",
+        maxResults: 5,
+        originalResultUrls: ["https://ollama.com"],
+      },
       results: [
         {
           resultIndex: 1,

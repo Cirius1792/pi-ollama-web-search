@@ -306,6 +306,126 @@ describe("extension", () => {
     }
   });
 
+  it("replays search refs after cached payload eviction and remaps by original URL occurrence", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              results: [
+                { title: "A1", url: "https://example.com/a", content: "first a" },
+                { title: "B", url: "https://example.com/b", content: "bee" },
+                { title: "A2", url: "https://example.com/a", content: "second a" },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              results: [{ title: "Evictor", url: "https://example.com/evictor", content: "x".repeat(1_200_000) }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              results: [
+                { title: "B replay", url: "https://example.com/b", content: "bee replay" },
+                { title: "A replay 1", url: "https://example.com/a", content: "first a replay" },
+                { title: "A replay 2", url: "https://example.com/a", content: "second a replay" },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResult = await searchTool!.execute("tool-search-1", { query: "dupes" }, new AbortController().signal);
+    const ref = searchResult.details.fullContentRef;
+
+    await searchTool!.execute("tool-search-evict", { query: "evict" }, new AbortController().signal);
+
+    await expect(
+      readFullTool!.execute("tool-read-replayed", { ref, section: "content", resultIndex: 3 }, new AbortController().signal),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: "second a replay" }],
+      details: {
+        ref,
+        kind: "search",
+        section: "content",
+        resultIndex: 3,
+        servedFrom: "replay",
+      },
+    });
+  });
+
+  it("fails clearly when search replay succeeds but the original result occurrence is gone", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              results: [
+                { title: "A1", url: "https://example.com/a", content: "first a" },
+                { title: "A2", url: "https://example.com/a", content: "second a" },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              results: [{ title: "Evictor", url: "https://example.com/evictor", content: "x".repeat(1_200_000) }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              results: [{ title: "A replay 1", url: "https://example.com/a", content: "first a replay" }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        ),
+    );
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResult = await searchTool!.execute("tool-search-1", { query: "dupes" }, new AbortController().signal);
+    const ref = searchResult.details.fullContentRef;
+
+    await searchTool!.execute("tool-search-evict", { query: "evict" }, new AbortController().signal);
+
+    await expect(
+      readFullTool!.execute("tool-read-missing-occurrence", { ref, section: "content", resultIndex: 2 }, new AbortController().signal),
+    ).rejects.toThrow(
+      `No stored content found for ref ${ref}. Replay succeeded, but the original search result 2 could not be reconstructed.`,
+    );
+  });
+
   it("validates search read-full errors end-to-end through the registered tool", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 

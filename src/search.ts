@@ -73,7 +73,11 @@ export async function runOllamaWebSearch(query: string, options: RunOllamaWebSea
     payload: normalized,
   });
 
-  const retrieval = buildSearchRetrievalMetadata(normalized);
+  const retrieval = buildSearchRetrievalMetadata({
+    payload: normalized,
+    query: trimmedQuery,
+    maxResults: options.config.maxResults,
+  });
   let truncated = false;
   const formattedResult = formatSearchResultsWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,

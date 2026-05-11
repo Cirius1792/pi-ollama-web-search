@@ -16,6 +16,11 @@ export interface SearchRetrievalResultMetadata {
 
 export interface SearchRetrievalMetadata {
   kind: "search";
+  replay: {
+    query: string;
+    maxResults: number;
+    originalResultUrls: string[];
+  };
   results: SearchRetrievalResultMetadata[];
 }
 
@@ -196,10 +201,19 @@ export function createSearchContentStore() {
   };
 }
 
-export function buildSearchRetrievalMetadata(payload: NormalizedSearchResponse): SearchRetrievalMetadata {
+export function buildSearchRetrievalMetadata(input: {
+  payload: NormalizedSearchResponse;
+  query: string;
+  maxResults: number;
+}): SearchRetrievalMetadata {
   return {
     kind: "search",
-    results: payload.results.map((result, index) => ({
+    replay: {
+      query: input.query,
+      maxResults: input.maxResults,
+      originalResultUrls: input.payload.results.map((result) => result.url),
+    },
+    results: input.payload.results.map((result, index) => ({
       resultIndex: index + 1,
       sections: {
         title: { totalChars: result.title.length },
