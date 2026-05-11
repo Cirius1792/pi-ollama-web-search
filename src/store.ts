@@ -35,6 +35,7 @@ export interface StoredSearchContent extends StoredSearchRetrievalBase {
 }
 
 export const SEARCH_CONTENT_STORE_MAX_BYTES = 1_000_000;
+export const SEARCH_CONTENT_STORE_MAX_ENTRIES = 256;
 
 interface StoredSearchEntry {
   replay: StoredSearchReplay;
@@ -92,17 +93,35 @@ export function createSearchContentStore() {
     contentStore.set(ref, entry);
   }
 
-  function evictPayload(ref: string, entry: StoredSearchEntry): void {
+  function evictPayload(entry: StoredSearchEntry): void {
     if (!entry.payload || entry.retainedBytes === 0) {
       return;
     }
 
-    totalRetainedBytes -= entry.retainedBytes;
+    totalRetainedBytes = Math.max(0, totalRetainedBytes - entry.retainedBytes);
     entry.payload = undefined;
     entry.retainedBytes = 0;
   }
 
-  function enforcePayloadBudget(newestRef: string): void {
+  function evictOldestEntry(): void {
+    const oldestRef = contentStore.keys().next().value;
+    if (!oldestRef) {
+      return;
+    }
+
+    const oldestEntry = contentStore.get(oldestRef);
+    if (oldestEntry) {
+      evictPayload(oldestEntry);
+    }
+
+    contentStore.delete(oldestRef);
+  }
+
+  function enforceStoreLimits(newestRef: string): void {
+    while (contentStore.size > SEARCH_CONTENT_STORE_MAX_ENTRIES) {
+      evictOldestEntry();
+    }
+
     if (totalRetainedBytes <= SEARCH_CONTENT_STORE_MAX_BYTES) {
       return;
     }
@@ -112,7 +131,7 @@ export function createSearchContentStore() {
         continue;
       }
 
-      evictPayload(ref, entry);
+      evictPayload(entry);
       if (totalRetainedBytes <= SEARCH_CONTENT_STORE_MAX_BYTES) {
         return;
       }
@@ -130,7 +149,7 @@ export function createSearchContentStore() {
     const existingEntry = contentStore.get(input.ref);
 
     if (existingEntry) {
-      evictPayload(input.ref, existingEntry);
+      evictPayload(existingEntry);
     }
 
     const entry: StoredSearchEntry = {
@@ -141,7 +160,7 @@ export function createSearchContentStore() {
 
     totalRetainedBytes += retainedBytes;
     touchEntry(input.ref, entry);
-    enforcePayloadBudget(input.ref);
+    enforceStoreLimits(input.ref);
   }
 
   function getStoredSearchContent(ref: string): StoredSearchContent | undefined {
@@ -155,7 +174,13 @@ export function createSearchContentStore() {
   }
 
   function getStoredSearchReplay(ref: string): StoredSearchReplay | undefined {
-    return contentStore.get(ref)?.replay;
+    const entry = contentStore.get(ref);
+    if (!entry) {
+      return undefined;
+    }
+
+    touchEntry(ref, entry);
+    return entry.replay;
   }
 
   function clearSearchContentStore(): void {

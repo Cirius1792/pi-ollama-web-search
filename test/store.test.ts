@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { SEARCH_CONTENT_STORE_MAX_BYTES, createFullContentRef, createSearchContentStore } from "../src/store.js";
+import {
+  SEARCH_CONTENT_STORE_MAX_BYTES,
+  SEARCH_CONTENT_STORE_MAX_ENTRIES,
+  createFullContentRef,
+  createSearchContentStore,
+} from "../src/store.js";
 
 describe("full content store", () => {
   it("evicts cached payloads by retained bytes but preserves replay metadata for the same ref", () => {
@@ -72,6 +77,37 @@ describe("full content store", () => {
       maxResults: 5,
       originalResultUrls: ["https://example.com/new"],
     });
+  });
+
+  it("bounds replay metadata entries after payload eviction pressure", () => {
+    const store = createSearchContentStore();
+    const refs = Array.from({ length: SEARCH_CONTENT_STORE_MAX_ENTRIES + 1 }, () => createFullContentRef("search"));
+
+    for (const [index, ref] of refs.entries()) {
+      store.rememberSearchContent({
+        ref,
+        query: `query-${String(index)}`,
+        maxResults: 5,
+        payload: {
+          results: [
+            {
+              title: `title-${String(index)}`,
+              url: `https://example.com/${String(index)}`,
+              content: "x".repeat(10_000),
+            },
+          ],
+        },
+      });
+    }
+
+    expect(store.getStoredSearchContent(refs[0])).toBeUndefined();
+    expect(store.getStoredSearchReplay(refs[0])).toBeUndefined();
+    expect(store.getStoredSearchReplay(refs[1])).toMatchObject({
+      ref: refs[1],
+      query: "query-1",
+      originalResultUrls: ["https://example.com/1"],
+    });
+    expect(store.getStoredSearchContent(refs.at(-1)!)).toBeDefined();
   });
 
   it("generates opaque refs instead of short sequential IDs", () => {
