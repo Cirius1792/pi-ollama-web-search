@@ -8,7 +8,13 @@ export interface RunOllamaWebSearchOptions {
   config: OllamaSearchConfig;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-  rememberSearchContent?: (input: { ref: string; query: string; maxResults: number; payload: NormalizedSearchResponse }) => void;
+  rememberSearchContent?: (input: {
+    ref: string;
+    query: string;
+    maxResults: number;
+    payload: NormalizedSearchResponse;
+    originalResultUrls?: string[];
+  }) => void;
 }
 
 export interface SearchResultDetails {

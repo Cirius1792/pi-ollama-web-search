@@ -40,6 +40,31 @@ describe("full content store", () => {
     expect(store.getStoredSearchContent(secondRef)).toBeDefined();
   });
 
+  it("preserves supplied original result URLs when replayed content is re-cached", () => {
+    const store = createSearchContentStore();
+    const ref = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref,
+      query: "dupes",
+      maxResults: 5,
+      payload: {
+        results: [
+          { title: "A replay 2", url: "https://example.com/a", content: "second a replay" },
+          { title: "A replay 1", url: "https://example.com/a", content: "first a replay" },
+        ],
+      },
+      originalResultUrls: ["https://example.com/a", "https://example.com/b", "https://example.com/a"],
+    });
+
+    expect(store.getStoredSearchReplay(ref)).toMatchObject({
+      ref,
+      query: "dupes",
+      maxResults: 5,
+      originalResultUrls: ["https://example.com/a", "https://example.com/b", "https://example.com/a"],
+    });
+  });
+
   it("keeps the newest oversized search payload retrievable", () => {
     const store = createSearchContentStore();
     const oldRef = createFullContentRef("search");

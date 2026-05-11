@@ -385,7 +385,89 @@ describe("extension", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("fails clearly when search replay succeeds but the original result occurrence is gone", async () => {
+  it("serves a requested replayed result even when an unrelated original result is gone", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { title: "A1", url: "https://example.com/a", content: "first a" },
+              { title: "B", url: "https://example.com/b", content: "bee" },
+              { title: "A2", url: "https://example.com/a", content: "second a" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [{ title: "Evictor", url: "https://example.com/evictor", content: "x".repeat(1_200_000) }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              { title: "A replay 2", url: "https://example.com/a", content: "second a replay" },
+              { title: "A replay 1", url: "https://example.com/a", content: "first a replay" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const fake = createFakePi();
+    extension(fake.pi as any);
+
+    const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+    const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+
+    const searchResult = await searchTool!.execute("tool-search-1", { query: "dupes" }, new AbortController().signal);
+    const ref = searchResult.details.fullContentRef;
+
+    await searchTool!.execute("tool-search-evict", { query: "evict" }, new AbortController().signal);
+
+    await expect(
+      readFullTool!.execute("tool-read-replayed", { ref, section: "content", resultIndex: 3 }, new AbortController().signal),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: "first a replay" }],
+      details: {
+        ref,
+        kind: "search",
+        section: "content",
+        resultIndex: 3,
+        servedFrom: "replay",
+      },
+    });
+
+    await expect(
+      readFullTool!.execute("tool-read-cached", { ref, section: "content", resultIndex: 1 }, new AbortController().signal),
+    ).resolves.toEqual({
+      content: [{ type: "text", text: "second a replay" }],
+      details: {
+        ref,
+        kind: "search",
+        section: "content",
+        resultIndex: 1,
+        servedFrom: "cache",
+      },
+    });
+
+    await expect(
+      readFullTool!.execute("tool-read-missing-unrelated", { ref, section: "content", resultIndex: 2 }, new AbortController().signal),
+    ).rejects.toThrow(`No stored content found for ref ${ref}. Replay succeeded, but the original search result 2 could not be reconstructed.`);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("fails clearly when the requested search replay occurrence is gone", async () => {
     process.env.OLLAMA_API_KEY = "test-key";
 
     vi.stubGlobal(

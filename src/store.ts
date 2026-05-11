@@ -57,13 +57,14 @@ function buildStoredSearchReplay(input: {
   query: string;
   maxResults: number;
   payload: NormalizedSearchResponse;
+  originalResultUrls?: string[];
 }): StoredSearchReplay {
   return {
     kind: "search",
     ref: input.ref,
     query: input.query,
     maxResults: input.maxResults,
-    originalResultUrls: input.payload.results.map((result) => result.url),
+    originalResultUrls: input.originalResultUrls ?? input.payload.results.map((result) => result.url),
   };
 }
 
@@ -148,6 +149,7 @@ export function createSearchContentStore() {
     query: string;
     maxResults: number;
     payload: NormalizedSearchResponse;
+    originalResultUrls?: string[];
   }): void {
     const replay = buildStoredSearchReplay(input);
     const retainedBytes = getRetainedBytes(input.payload);
