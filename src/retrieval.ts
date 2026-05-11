@@ -80,6 +80,7 @@ export interface ReadFullFileResult {
 export type ReadFullFetchResult = ReadFullInlineResult | ReadFullFileResult;
 
 export const FETCH_RETRIEVAL_STORE_MAX_ENTRIES = 256;
+export const FETCH_RETRIEVAL_STORE_MAX_REFS = 1_024;
 export const FETCH_RETRIEVAL_STORE_MAX_BYTES = 1_000_000;
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -206,6 +207,20 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
     fetchRetrievalStorePayloadEntries += 1;
   }
 
+  function evictOldestEntry(retainRef?: string): boolean {
+    for (const [ref, entry] of fetchRetrievalStore) {
+      if (ref === retainRef) {
+        continue;
+      }
+
+      evictPayload(entry);
+      fetchRetrievalStore.delete(ref);
+      return true;
+    }
+
+    return false;
+  }
+
   function evictOldestPayload(retainRef?: string): boolean {
     for (const [ref, entry] of fetchRetrievalStore) {
       if (ref === retainRef || !entry.payload) {
@@ -220,6 +235,12 @@ export function createFetchRetrievalStore(): FetchRetrievalStore {
   }
 
   function enforceFetchStoreLimit(retainRef?: string): void {
+    while (fetchRetrievalStore.size > FETCH_RETRIEVAL_STORE_MAX_REFS) {
+      if (!evictOldestEntry(retainRef)) {
+        break;
+      }
+    }
+
     while (fetchRetrievalStorePayloadEntries > FETCH_RETRIEVAL_STORE_MAX_ENTRIES) {
       if (!evictOldestPayload(retainRef)) {
         break;
