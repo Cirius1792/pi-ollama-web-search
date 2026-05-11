@@ -186,8 +186,12 @@ export function createFullContentRef(_kind: "search"): string {
   return `ws_s_${createOpaqueRefToken()}`;
 }
 
-export function createSearchContentStore(options?: { maxRetainedBytes?: number }) {
+export function createSearchContentStore(options?: {
+  maxRetainedBytes?: number;
+  replaySearch?: (params: { query: string; maxResults: number; signal?: AbortSignal }) => Promise<NormalizedSearchResponse>;
+}) {
   const maxRetainedBytes = options?.maxRetainedBytes ?? DEFAULT_SEARCH_CONTENT_CACHE_MAX_BYTES;
+  const replaySearch = options?.replaySearch;
 
   if (!Number.isFinite(maxRetainedBytes) || maxRetainedBytes <= 0) {
     throw new Error("maxRetainedBytes must be greater than 0.");
@@ -271,12 +275,7 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
     return touchCachedPayload(ref)?.value;
   }
 
-  async function readSearchContent(
-    input: ReadStoredSearchContentParams,
-    options: {
-      replaySearch: (params: { query: string; maxResults: number; signal?: AbortSignal }) => Promise<NormalizedSearchResponse>;
-    },
-  ): Promise<ReadStoredSearchContentResult> {
+  async function readSearchContent(input: ReadStoredSearchContentParams): Promise<ReadStoredSearchContentResult> {
     validateInlineIntegerInput("Offset", input.offset, 0);
     validateInlineIntegerInput("maxChars", input.maxChars, 1);
 
@@ -313,7 +312,11 @@ export function createSearchContentStore(options?: { maxRetainedBytes?: number }
     }
 
     try {
-      const replayedPayload = await options.replaySearch({
+      if (!replaySearch) {
+        throw new Error("Search replay is not configured.");
+      }
+
+      const replayedPayload = await replaySearch({
         query: metadata.query,
         maxResults: metadata.maxResults,
         signal: input.signal,

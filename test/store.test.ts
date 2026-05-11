@@ -15,7 +15,16 @@ function createPayload(marker: string, content = `content-${marker}`) {
 
 describe("search content store", () => {
   it("evicts by byte size and still replays from stable ref metadata", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 220 });
+    const replaySearch = vi.fn().mockResolvedValue({
+      results: [
+        {
+          title: "replayed title",
+          url: "https://example.com/original",
+          content: "replayed content",
+        },
+      ],
+    });
+    const store = createSearchContentStore({ maxRetainedBytes: 220, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -52,20 +61,7 @@ describe("search content store", () => {
     expect(store.getStoredSearchContent(ref)).toBeUndefined();
     expect(store.getStoredSearchContent(secondRef)?.payload.results[0]?.url).toBe("https://example.com/newer");
 
-    const replaySearch = vi.fn().mockResolvedValue({
-      results: [
-        {
-          title: "replayed title",
-          url: "https://example.com/original",
-          content: "replayed content",
-        },
-      ],
-    });
-
-    const result = await store.readSearchContent(
-      { ref, resultIndex: 1, section: "content" },
-      { replaySearch },
-    );
+    const result = await store.readSearchContent({ ref, resultIndex: 1, section: "content" });
 
     expect(replaySearch).toHaveBeenCalledWith({ query: "replay me", maxResults: 3, signal: undefined });
     expect(result.text).toBe("replayed content");
@@ -75,7 +71,14 @@ describe("search content store", () => {
   });
 
   it("remaps duplicate URLs by occurrence order on replay", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 1024 });
+    const replaySearch = vi.fn().mockResolvedValue({
+      results: [
+        { title: "replay-a1", url: "https://example.com/a", content: "replay-a1" },
+        { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
+        { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
+      ],
+    });
+    const store = createSearchContentStore({ maxRetainedBytes: 1024, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -93,23 +96,9 @@ describe("search content store", () => {
 
     store.clearCachedSearchPayloads();
 
-    const replaySearch = vi.fn().mockResolvedValue({
-      results: [
-        { title: "replay-a1", url: "https://example.com/a", content: "replay-a1" },
-        { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
-        { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
-      ],
-    });
+    const replayed = await store.readSearchContent({ ref, resultIndex: 3, section: "content" });
 
-    const replayed = await store.readSearchContent(
-      { ref, resultIndex: 3, section: "content" },
-      { replaySearch },
-    );
-
-    const cached = await store.readSearchContent(
-      { ref, resultIndex: 3, section: "content" },
-      { replaySearch },
-    );
+    const cached = await store.readSearchContent({ ref, resultIndex: 3, section: "content" });
 
     expect(replayed.text).toBe("replay-a2");
     expect(replayed.details.servedFrom).toBe("replay");
@@ -120,7 +109,8 @@ describe("search content store", () => {
   });
 
   it("returns combined cache-miss and replay-failure errors", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const replaySearch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -132,18 +122,16 @@ describe("search content store", () => {
 
     store.clearCachedSearchPayloads();
 
-    const replaySearch = vi.fn().mockRejectedValue(new Error("upstream unavailable"));
-
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 1, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toThrow(`No stored content found for ref ${ref}. Replay also failed: upstream unavailable`);
+    await expect(store.readSearchContent({ ref, resultIndex: 1, section: "content" })).rejects.toThrow(
+      `No stored content found for ref ${ref}. Replay also failed: upstream unavailable`,
+    );
   });
 
   it("rethrows replay AbortError unchanged", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const abortError = new Error("The operation was aborted.");
+    abortError.name = "AbortError";
+    const replaySearch = vi.fn().mockRejectedValue(abortError);
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -155,20 +143,35 @@ describe("search content store", () => {
 
     store.clearCachedSearchPayloads();
 
-    const abortError = new Error("The operation was aborted.");
-    abortError.name = "AbortError";
-    const replaySearch = vi.fn().mockRejectedValue(abortError);
+    await expect(store.readSearchContent({ ref, resultIndex: 1, section: "content" })).rejects.toBe(abortError);
+  });
 
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 1, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toBe(abortError);
+  it("surfaces a replay-not-configured error when cache is empty", async () => {
+    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const ref = createFullContentRef("search");
+
+    store.rememberSearchContent({
+      ref,
+      query: "replay unavailable",
+      maxResults: 1,
+      payload: createPayload("missing-replay"),
+    });
+
+    store.clearCachedSearchPayloads();
+
+    await expect(store.readSearchContent({ ref, resultIndex: 1, section: "content" })).rejects.toThrow(
+      `No stored content found for ref ${ref}. Replay also failed: Search replay is not configured.`,
+    );
   });
 
   it("returns requested replayed result when another original result is missing", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 220 });
+    const replaySearch = vi.fn().mockResolvedValue({
+      results: [
+        { title: "replay-a1", url: "https://example.com/a", content: "replay-a1" },
+        { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
+      ],
+    });
+    const store = createSearchContentStore({ maxRetainedBytes: 220, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -202,17 +205,7 @@ describe("search content store", () => {
 
     expect(store.getStoredSearchContent(ref)).toBeUndefined();
 
-    const replaySearch = vi.fn().mockResolvedValue({
-      results: [
-        { title: "replay-a1", url: "https://example.com/a", content: "replay-a1" },
-        { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
-      ],
-    });
-
-    const replayed = await store.readSearchContent(
-      { ref, resultIndex: 3, section: "content" },
-      { replaySearch },
-    );
+    const replayed = await store.readSearchContent({ ref, resultIndex: 3, section: "content" });
 
     expect(replayed.text).toBe("replay-a2");
     expect(replayed.details.servedFrom).toBe("replay");
@@ -243,7 +236,23 @@ describe("search content store", () => {
   });
 
   it("returns combined cache-miss envelope when replay remap/cache work fails", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 220 });
+    const replaySearch = vi.fn().mockResolvedValue((() => {
+      const circular: Record<string, unknown> = {
+        title: "replay-a1",
+        url: "https://example.com/a",
+        content: "replay-a1",
+      };
+      circular.self = circular;
+
+      return {
+        results: [
+          circular,
+          { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
+          { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
+        ],
+      };
+    })());
+    const store = createSearchContentStore({ maxRetainedBytes: 220, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -275,40 +284,16 @@ describe("search content store", () => {
       },
     });
 
-    const replaySearch = vi.fn().mockResolvedValue((() => {
-      const circular: Record<string, unknown> = {
-        title: "replay-a1",
-        url: "https://example.com/a",
-        content: "replay-a1",
-      };
-      circular.self = circular;
+    await expect(store.readSearchContent({ ref, resultIndex: 3, section: "content" })).rejects.toThrow(
+      `No stored content found for ref ${ref}. Replay also failed:`,
+    );
 
-      return {
-        results: [
-          circular,
-          { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
-          { title: "replay-a2", url: "https://example.com/a", content: "replay-a2" },
-        ],
-      };
-    })());
-
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 3, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toThrow(`No stored content found for ref ${ref}. Replay also failed:`);
-
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 3, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toThrow(/circular structure/i);
+    await expect(store.readSearchContent({ ref, resultIndex: 3, section: "content" })).rejects.toThrow(/circular structure/i);
   });
 
   it("validates resultIndex range in readSearchContent", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const replaySearch = vi.fn();
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -318,27 +303,20 @@ describe("search content store", () => {
       payload: createPayload("range"),
     });
 
-    const replaySearch = vi.fn();
+    await expect(store.readSearchContent({ ref, resultIndex: 0, section: "content" })).rejects.toThrow(
+      "Search result index 0 is out of range. Valid range is 1-1.",
+    );
 
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 0, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toThrow("Search result index 0 is out of range. Valid range is 1-1.");
-
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 2, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toThrow("Search result index 2 is out of range. Valid range is 1-1.");
+    await expect(store.readSearchContent({ ref, resultIndex: 2, section: "content" })).rejects.toThrow(
+      "Search result index 2 is out of range. Valid range is 1-1.",
+    );
 
     expect(replaySearch).not.toHaveBeenCalled();
   });
 
   it("validates offset and maxChars in readSearchContent", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const replaySearch = vi.fn();
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -348,27 +326,20 @@ describe("search content store", () => {
       payload: createPayload("slice"),
     });
 
-    const replaySearch = vi.fn();
+    await expect(store.readSearchContent({ ref, resultIndex: 1, section: "content", offset: -1 })).rejects.toThrow(
+      "Offset must be an integer greater than or equal to 0.",
+    );
 
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 1, section: "content", offset: -1 },
-        { replaySearch },
-      ),
-    ).rejects.toThrow("Offset must be an integer greater than or equal to 0.");
-
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 1, section: "content", maxChars: 0 },
-        { replaySearch },
-      ),
-    ).rejects.toThrow("maxChars must be an integer greater than or equal to 1.");
+    await expect(store.readSearchContent({ ref, resultIndex: 1, section: "content", maxChars: 0 })).rejects.toThrow(
+      "maxChars must be an integer greater than or equal to 1.",
+    );
 
     expect(replaySearch).not.toHaveBeenCalled();
   });
 
   it("supports slicing for cached reads", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 256 });
+    const replaySearch = vi.fn();
+    const store = createSearchContentStore({ maxRetainedBytes: 256, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -378,12 +349,7 @@ describe("search content store", () => {
       payload: createPayload("cached", "0123456789"),
     });
 
-    const replaySearch = vi.fn();
-
-    const result = await store.readSearchContent(
-      { ref, resultIndex: 1, section: "content", offset: 2, maxChars: 4 },
-      { replaySearch },
-    );
+    const result = await store.readSearchContent({ ref, resultIndex: 1, section: "content", offset: 2, maxChars: 4 });
 
     expect(result.text).toBe("2345");
     expect(result.details.servedFrom).toBe("cache");
@@ -391,7 +357,16 @@ describe("search content store", () => {
   });
 
   it("supports slicing for replayed reads", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 32 });
+    const replaySearch = vi.fn().mockResolvedValue({
+      results: [
+        {
+          title: "title-replay",
+          url: "https://example.com/replay",
+          content: "abcdefghij",
+        },
+      ],
+    });
+    const store = createSearchContentStore({ maxRetainedBytes: 32, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -411,27 +386,20 @@ describe("search content store", () => {
 
     expect(store.getStoredSearchContent(ref)).toBeUndefined();
 
-    const replaySearch = vi.fn().mockResolvedValue({
-      results: [
-        {
-          title: "title-replay",
-          url: "https://example.com/replay",
-          content: "abcdefghij",
-        },
-      ],
-    });
-
-    const result = await store.readSearchContent(
-      { ref, resultIndex: 1, section: "content", offset: 3, maxChars: 3 },
-      { replaySearch },
-    );
+    const result = await store.readSearchContent({ ref, resultIndex: 1, section: "content", offset: 3, maxChars: 3 });
 
     expect(result.text).toBe("def");
     expect(result.details.servedFrom).toBe("replay");
   });
 
   it("returns combined cache-miss and replay-failure errors when replay cannot reconstruct URL occurrences", async () => {
-    const store = createSearchContentStore({ maxRetainedBytes: 220 });
+    const replaySearch = vi.fn().mockResolvedValue({
+      results: [
+        { title: "replay-a1", url: "https://example.com/a", content: "replay-a1" },
+        { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
+      ],
+    });
+    const store = createSearchContentStore({ maxRetainedBytes: 220, replaySearch });
     const ref = createFullContentRef("search");
 
     store.rememberSearchContent({
@@ -465,19 +433,7 @@ describe("search content store", () => {
 
     expect(store.getStoredSearchContent(ref)).toBeUndefined();
 
-    const replaySearch = vi.fn().mockResolvedValue({
-      results: [
-        { title: "replay-a1", url: "https://example.com/a", content: "replay-a1" },
-        { title: "replay-b1", url: "https://example.com/b", content: "replay-b1" },
-      ],
-    });
-
-    await expect(
-      store.readSearchContent(
-        { ref, resultIndex: 3, section: "content" },
-        { replaySearch },
-      ),
-    ).rejects.toThrow(
+    await expect(store.readSearchContent({ ref, resultIndex: 3, section: "content" })).rejects.toThrow(
       new RegExp(
         `^No stored content found for ref ${ref}\\. Replay also failed: Unable to reconstruct original result 3 for URL https://example\\.com/a \\(occurrence 2\\) during replay\\.$`,
       ),

@@ -70,7 +70,23 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
       return normalizeWebFetchResponse(replayRaw);
     },
   });
-  const searchContentStore = createSearchContentStore();
+  const searchContentStore = createSearchContentStore({
+    replaySearch: async ({ query, maxResults, signal }) => {
+      if (!config.apiKey) {
+        throw new Error(getMissingApiKeyMessage());
+      }
+
+      const replayRaw = await searchOllamaWeb({
+        endpoint: config.searchEndpoint,
+        apiKey: config.apiKey,
+        query,
+        maxResults,
+        signal,
+      });
+
+      return normalizeWebSearchResponse(replayRaw);
+    },
+  });
 
   pi.registerTool({
     name: "ollama_web_search",
@@ -149,24 +165,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         { ...params, cwd: ctx?.cwd, signal },
         {
           readFullFetchContent: fetchRetrievalStore.readFullFetchContent,
-          readSearchContent: (readParams) =>
-            searchContentStore.readSearchContent(readParams, {
-              replaySearch: async ({ query, maxResults, signal: replaySignal }) => {
-                if (!config.apiKey) {
-                  throw new Error(getMissingApiKeyMessage());
-                }
-
-                const replayRaw = await searchOllamaWeb({
-                  endpoint: config.searchEndpoint,
-                  apiKey: config.apiKey,
-                  query,
-                  maxResults,
-                  signal: replaySignal,
-                });
-
-                return normalizeWebSearchResponse(replayRaw);
-              },
-            }),
+          readSearchContent: searchContentStore.readSearchContent,
         },
       );
 
