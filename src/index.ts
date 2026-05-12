@@ -1,7 +1,12 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fetchOllamaWeb, searchOllamaWeb } from "./client.js";
-import { getMissingApiKeyMessage, loadConfig } from "./config.js";
+import {
+  getMissingApiKeyMessage,
+  loadConfigWithWarnings,
+  resolveActiveProfile,
+  type OllamaSearchConfig,
+} from "./config.js";
 import { runOllamaWebFetch } from "./fetch.js";
 import { normalizeWebSearchResponse } from "./normalize.js";
 import { runOllamaWebReadFull } from "./read-full.js";
@@ -90,8 +95,69 @@ function parseReadFullDebugArgs(args: string): Omit<Parameters<typeof runOllamaW
   return parsed;
 }
 
+interface ToolExecutionContext {
+  cwd?: string;
+  model?: {
+    provider?: unknown;
+    id?: unknown;
+  };
+  ui?: {
+    notify?: (message: string, level: "warning") => void;
+  };
+}
+
+function getActiveModelResolution(ctx?: ToolExecutionContext): {
+  activeModelKey?: string;
+  activeModelAvailable?: boolean;
+} {
+  const provider = typeof ctx?.model?.provider === "string" ? ctx.model.provider.trim() : "";
+  const id = typeof ctx?.model?.id === "string" ? ctx.model.id.trim() : "";
+
+  if (!ctx?.model || !provider || !id) {
+    return {
+      activeModelAvailable: false,
+    };
+  }
+
+  return {
+    activeModelKey: `${provider}/${id}`,
+  };
+}
+
+function resolveExecutionConfig(
+  config: OllamaSearchConfig,
+  document: Parameters<typeof resolveActiveProfile>[0]["document"],
+  configRoot: string,
+  ctx?: ToolExecutionContext,
+): OllamaSearchConfig {
+  const scopedConfig = ctx?.cwd
+    ? loadConfigWithWarnings(process.env, { configRoot, projectRoot: ctx.cwd })
+    : undefined;
+  const activeDocument = scopedConfig?.document ?? document;
+
+  for (const warning of scopedConfig?.warnings ?? []) {
+    ctx?.ui?.notify?.(warning, "warning");
+  }
+
+  const activeProfile = resolveActiveProfile({
+    document: activeDocument,
+    ...getActiveModelResolution(ctx),
+  });
+
+  for (const warning of activeProfile.warnings ?? []) {
+    ctx?.ui?.notify?.(warning, "warning");
+  }
+
+  return {
+    ...config,
+    maxResults: activeProfile.profile.maxResults,
+    maxOutputChars: activeProfile.profile.maxOutputChars,
+  };
+}
+
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
-  const config = loadConfig(process.env, { configRoot: getAgentDir() });
+  const configRoot = getAgentDir();
+  const { config, document, warnings: configWarnings } = loadConfigWithWarnings(process.env, { configRoot });
   const fetchRetrievalStore = createFetchRetrievalStore({
     replayFetch: async ({ url, signal }) => {
       if (!config.apiKey) {
@@ -137,9 +203,10 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     ],
     parameters: SearchParams,
 
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const activeConfig = resolveExecutionConfig(config, document, configRoot, ctx);
       const result = await runOllamaWebSearch(params.query, {
-        config,
+        config: activeConfig,
         signal,
         rememberSearchContent: searchContentStore.rememberSearchContent,
       });
@@ -168,9 +235,10 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     ],
     parameters: FetchParams,
 
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const activeConfig = resolveExecutionConfig(config, document, configRoot, ctx);
       const result = await runOllamaWebFetch(params.url, {
-        config,
+        config: activeConfig,
         signal,
         registerFetchRetrieval: fetchRetrievalStore.registerFetchRetrieval,
       });
@@ -293,8 +361,14 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     fetchRetrievalStore.clearFetchRetrievalStore();
     searchContentStore.clearSearchContentStore();
 
-    if (!config.apiKey && ctx.hasUI) {
-      ctx.ui.notify(getMissingApiKeyMessage(), "warning");
+    if (ctx.hasUI) {
+      for (const warning of configWarnings) {
+        ctx.ui.notify(warning, "warning");
+      }
+
+      if (!config.apiKey) {
+        ctx.ui.notify(getMissingApiKeyMessage(), "warning");
+      }
     }
   });
 

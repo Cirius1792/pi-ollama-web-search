@@ -1,8 +1,9 @@
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "../src/index.js";
+import packageJson from "../package.json" with { type: "json" };
 import { FETCH_RETRIEVAL_STORE_MAX_ENTRIES } from "../src/retrieval.js";
 
 interface RegisteredTool {
@@ -1481,6 +1482,314 @@ describe("extension", () => {
     }
   });
 
+  it("applies model-specific profile overrides during production tool execution", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(
+        join(agentDir, "pi-ollama-web-search.json"),
+        JSON.stringify({
+          default: {
+            maxResults: 3,
+            maxOutputChars: 120,
+          },
+          models: {
+            "ollama/qwen3:14b": {
+              maxResults: 1,
+              maxOutputChars: 80,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; max_results?: number; url?: string };
+
+        if (body.query) {
+          return jsonResponse({
+            results: [
+              { title: "One", url: "https://example.com/one", content: "First result" },
+              { title: "Two", url: "https://example.com/two", content: "Second result" },
+              { title: "Three", url: "https://example.com/three", content: "Third result" },
+            ].slice(0, body.max_results),
+          });
+        }
+
+        return jsonResponse({
+          title: "Example page",
+          content: "x".repeat(200),
+          links: ["https://example.com/a"],
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const fake = createFakePi();
+      extension(fake.pi as any);
+
+      const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+      const fetchTool = fake.tools.find((tool) => tool.name === "ollama_web_fetch");
+
+      const ctx = {
+        model: {
+          provider: "ollama",
+          id: "qwen3:14b",
+        },
+        ui: {
+          notify: vi.fn(),
+        },
+      };
+
+      const searchResult = await searchTool!.execute(
+        "tool-search-model-profile",
+        { query: "profiled query" },
+        new AbortController().signal,
+        undefined,
+        ctx,
+      );
+      const fetchResult = await fetchTool!.execute(
+        "tool-fetch-model-profile",
+        { url: "https://example.com/page" },
+        new AbortController().signal,
+        undefined,
+        ctx,
+      );
+
+      expect(searchResult.details.results).toHaveLength(1);
+      expect(searchResult.details.maxOutputChars).toBe(80);
+      expect(fetchResult.details.maxOutputChars).toBe(80);
+      expect(fetchResult.details.truncated).toBe(true);
+      expect(ctx.ui.notify).not.toHaveBeenCalled();
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
+        query: "profiled query",
+        max_results: 1,
+      });
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the default profile and warns when the current model is unavailable", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(
+        join(agentDir, "pi-ollama-web-search.json"),
+        JSON.stringify({
+          default: {
+            maxResults: 2,
+            maxOutputChars: 70,
+          },
+          models: {
+            "ollama/qwen3:14b": {
+              maxResults: 1,
+              maxOutputChars: 40,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { max_results?: number };
+
+        return jsonResponse({
+          results: [
+            { title: "One", url: "https://example.com/one", content: "First result" },
+            { title: "Two", url: "https://example.com/two", content: "Second result" },
+          ].slice(0, body.max_results),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const fake = createFakePi();
+      extension(fake.pi as any);
+
+      const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+      const notify = vi.fn();
+
+      const result = await searchTool!.execute(
+        "tool-search-default-profile",
+        { query: "default profile query" },
+        new AbortController().signal,
+        undefined,
+        { ui: { notify } },
+      );
+
+      expect(result.details.results).toHaveLength(2);
+      expect(result.details.maxOutputChars).toBe(70);
+      expect(notify).toHaveBeenCalledWith(
+        "Using the default search profile because the current model could not be determined.",
+        "warning",
+      );
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
+        query: "default profile query",
+        max_results: 2,
+      });
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("applies project-level model overrides during tool execution when ctx.cwd is provided", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "pi-ollama-project-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(
+        join(agentDir, "pi-ollama-web-search.json"),
+        JSON.stringify({
+          default: {
+            maxResults: 3,
+            maxOutputChars: 120,
+          },
+          models: {
+            "ollama/qwen3:14b": {
+              maxResults: 2,
+              maxOutputChars: 90,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      await mkdir(join(projectRoot, ".pi"), { recursive: true });
+      await writeFile(
+        join(projectRoot, ".pi", "pi-ollama-web-search.json"),
+        JSON.stringify({
+          models: {
+            "ollama/qwen3:14b": {
+              maxResults: 1,
+              maxOutputChars: 70,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; max_results?: number };
+
+        return jsonResponse({
+          results: [
+            { title: "One", url: "https://example.com/one", content: "First result" },
+            { title: "Two", url: "https://example.com/two", content: "Second result" },
+          ].slice(0, body.max_results),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const fake = createFakePi();
+      extension(fake.pi as any);
+
+      const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+      const notify = vi.fn();
+
+      const result = await searchTool!.execute(
+        "tool-search-project-override",
+        { query: "project override query" },
+        new AbortController().signal,
+        undefined,
+        {
+          cwd: projectRoot,
+          model: {
+            provider: "ollama",
+            id: "qwen3:14b",
+          },
+          ui: { notify },
+        },
+      );
+
+      expect(result.details.results).toHaveLength(1);
+      expect(result.details.maxOutputChars).toBe(70);
+      expect(notify).not.toHaveBeenCalled();
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
+        query: "project override query",
+        max_results: 1,
+      });
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the fallback path and warns when project config is invalid during tool execution", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "pi-ollama-project-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(
+        join(agentDir, "pi-ollama-web-search.json"),
+        JSON.stringify({
+          default: {
+            maxResults: 2,
+            maxOutputChars: 70,
+          },
+        }),
+        "utf8",
+      );
+
+      await mkdir(join(projectRoot, ".pi"), { recursive: true });
+      await writeFile(join(projectRoot, ".pi", "pi-ollama-web-search.json"), "{\n  invalid json\n", "utf8");
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { max_results?: number };
+
+        return jsonResponse({
+          results: [
+            { title: "One", url: "https://example.com/one", content: "First result" },
+            { title: "Two", url: "https://example.com/two", content: "Second result" },
+          ].slice(0, body.max_results),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const fake = createFakePi();
+      extension(fake.pi as any);
+
+      const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+      const notify = vi.fn();
+
+      const result = await searchTool!.execute(
+        "tool-search-invalid-project-config",
+        { query: "invalid project config query" },
+        new AbortController().signal,
+        undefined,
+        {
+          cwd: projectRoot,
+          model: {
+            provider: "ollama",
+            id: "qwen3:14b",
+          },
+          ui: { notify },
+        },
+      );
+
+      expect(result.details.results).toHaveLength(2);
+      expect(result.details.maxOutputChars).toBe(70);
+      expect(notify).toHaveBeenCalledWith(expect.stringContaining("Ignoring invalid project config"), "warning");
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
+        query: "invalid project config query",
+        max_results: 2,
+      });
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it("registers a session_start warning for missing API key", async () => {
     const fake = createFakePi();
     extension(fake.pi as any);
@@ -1489,5 +1798,72 @@ describe("extension", () => {
     await fake.handlers.session_start({}, { hasUI: true, ui: { notify } });
 
     expect(notify).toHaveBeenCalledWith(expect.stringContaining("OLLAMA_API_KEY is not set"), "warning");
+  });
+
+  it("registers config and missing-key warnings independently on session_start", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+
+      const currentMajorVersion = Number.parseInt(packageJson.version.split(".")[0] ?? "0", 10);
+      await writeFile(
+        join(agentDir, "pi-ollama-web-search.json"),
+        JSON.stringify({
+          version: `${currentMajorVersion + 1}.0.0`,
+          default: {
+            maxResults: 4,
+            maxOutputChars: 8_000,
+          },
+        }),
+        "utf8",
+      );
+
+      const fake = createFakePi();
+      extension(fake.pi as any);
+
+      expect(fake.pi.registerTool).toHaveBeenCalledTimes(3);
+      expect(fake.tools.map((tool) => tool.name)).toEqual(
+        expect.arrayContaining(["ollama_web_search", "ollama_web_fetch", "ollama_web_read_full"]),
+      );
+
+      const notify = vi.fn();
+      await fake.handlers.session_start({}, { hasUI: true, ui: { notify } });
+
+      const warningMessages = notify.mock.calls
+        .filter((call) => call[1] === "warning")
+        .map((call) => String(call[0]));
+
+      expect(warningMessages.some((message) => message.includes("unsupported major version"))).toBe(true);
+      expect(warningMessages.some((message) => message.includes("OLLAMA_API_KEY is not set"))).toBe(true);
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block startup on invalid extension config and warns on session_start", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(join(agentDir, "pi-ollama-web-search.json"), "{\n  invalid json\n", "utf8");
+
+      const fake = createFakePi();
+
+      expect(() => extension(fake.pi as any)).not.toThrow();
+      expect(fake.pi.registerTool).toHaveBeenCalledTimes(3);
+
+      const notify = vi.fn();
+      await fake.handlers.session_start({}, { hasUI: true, ui: { notify } });
+
+      const warningMessages = notify.mock.calls
+        .filter((call) => call[1] === "warning")
+        .map((call) => String(call[0]));
+
+      expect(warningMessages.some((message) => message.includes("Ignoring invalid extension config"))).toBe(true);
+      expect(warningMessages.some((message) => message.includes("OLLAMA_API_KEY is not set"))).toBe(true);
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
   });
 });
