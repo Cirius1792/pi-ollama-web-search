@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Agent skills
+
+### Issue tracker
+
+Issues for this repo are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+This repo uses the default canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo is configured as single-context. See `docs/agents/domain.md`.
+
 ## Repository overview
 
 This repository contains `@cltec/pi-ollama-web-search`, a TypeScript ESM pi extension package that registers `ollama_web_search` and `ollama_web_fetch` tools. The tools call Ollama's Web Search and Web Fetch APIs and return formatted results to pi.
