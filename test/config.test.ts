@@ -21,6 +21,7 @@ import {
 const EXPECTED_SEARCH_ENDPOINT = "https://ollama.com/api/web_search";
 const EXPECTED_FETCH_ENDPOINT = "https://ollama.com/api/web_fetch";
 const EXPECTED_CONFIG_MAJOR_VERSION = packageJson.version.split(".")[0];
+const EXPECTED_GENERATED_CONFIG_VERSION = packageJson.version.split(".").slice(0, 2).join(".");
 const MISMATCHED_CONFIG_VERSION = `${Number.parseInt(EXPECTED_CONFIG_MAJOR_VERSION, 10) + 1}.9.0`;
 
 describe("isTruthyEnv", () => {
@@ -193,7 +194,8 @@ describe("loadConfig", () => {
       expect(config.maxOutputChars).toBe(12_000);
       expect(
         JSON.parse(await readFile(join(configRoot, "pi-ollama-web-search.json"), "utf8")),
-      ).toMatchObject({
+      ).toEqual({
+        version: EXPECTED_GENERATED_CONFIG_VERSION,
         default: {
           maxResults: 3,
           maxOutputChars: 12_000,
@@ -466,6 +468,7 @@ describe("loadExtensionProfileConfig", () => {
 
       expect(result).toEqual({
         document: {
+          version: EXPECTED_GENERATED_CONFIG_VERSION,
           default: {
             maxResults: LOCAL_FIRST_MAX_RESULTS,
             maxOutputChars: 8_000,
@@ -508,6 +511,7 @@ describe("loadExtensionProfileConfig", () => {
       const result = loadExtensionProfileConfig({ globalConfigPath });
 
       expect(result.document).toEqual({
+        version: EXPECTED_GENERATED_CONFIG_VERSION,
         default: {
           maxResults: LOCAL_FIRST_MAX_RESULTS,
           maxOutputChars: LOCAL_FIRST_MAX_OUTPUT_CHARS,

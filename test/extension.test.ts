@@ -6,6 +6,8 @@ import extension from "../src/index.js";
 import packageJson from "../package.json" with { type: "json" };
 import { FETCH_RETRIEVAL_STORE_MAX_ENTRIES } from "../src/retrieval.js";
 
+const EXPECTED_GENERATED_CONFIG_VERSION = packageJson.version.split(".").slice(0, 2).join(".");
+
 interface RegisteredTool {
   name: string;
   description?: string;
@@ -81,6 +83,13 @@ describe("extension", () => {
         expect.arrayContaining(["ollama_web_search", "ollama_web_fetch", "ollama_web_read_full"]),
       );
       await expect(access(join(agentDir, "pi-ollama-web-search.json"))).resolves.toBeUndefined();
+      expect(JSON.parse(await readFile(join(agentDir, "pi-ollama-web-search.json"), "utf8"))).toEqual({
+        version: EXPECTED_GENERATED_CONFIG_VERSION,
+        default: {
+          maxResults: 3,
+          maxOutputChars: 12_000,
+        },
+      });
     } finally {
       await rm(agentDir, { recursive: true, force: true });
     }
