@@ -86,10 +86,11 @@ The extension uses a dedicated config file named `pi-ollama-web-search.json`.
 
 On startup, the extension creates a global config file automatically if it does not already exist.
 
-That file lives in pi's active config directory and starts with conservative local-first defaults:
+That file lives in pi's active config directory and starts with conservative local-first defaults plus a top-level config version derived from the installed package version:
 
 ```json
 {
+  "version": "1.0",
   "default": {
     "maxResults": 3,
     "maxOutputChars": 12000
@@ -115,6 +116,7 @@ Example:
 
 ```json
 {
+  "version": "1.0",
   "default": {
     "maxResults": 3,
     "maxOutputChars": 12000
@@ -142,9 +144,11 @@ Matching rules:
 
 Each model override must be a complete profile. In other words, model entries are not partial patches: include both `maxResults` and `maxOutputChars` for each override.
 
-### Optional version field
+### Version field
 
-Config files may include a top-level `version` string. If the config major version does not match the installed package major version, the extension warns and still uses the config when it is otherwise structurally valid.
+Auto-generated global configs include a top-level `version` string in `major.minor` form based on the installed package version.
+
+You can also include `version` in manually managed config files. Legacy configs without a `version` field remain valid and load without warnings. If the config major version does not match the installed package major version, the extension warns and still uses the config when it is otherwise structurally valid.
 
 ### Invalid config behavior
 

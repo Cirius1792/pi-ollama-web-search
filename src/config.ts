@@ -83,6 +83,7 @@ const SUPPORTED_CONFIG_MAJOR_VERSION = Number.parseInt(
   SUPPORTED_EXTENSION_VERSION.split(".")[0] ?? "0",
   10,
 );
+const GENERATED_CONFIG_VERSION = formatGeneratedConfigVersion(SUPPORTED_EXTENSION_VERSION);
 
 export function isTruthyEnv(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase();
@@ -135,8 +136,17 @@ function getProjectConfigPath(projectRoot: string): string {
   return join(projectRoot, PROJECT_CONFIG_DIR, CONFIG_FILE_NAME);
 }
 
+function formatGeneratedConfigVersion(version: string): string {
+  const [majorPart = "0", minorPart = "0"] = version.split(".");
+  const major = Number.parseInt(majorPart, 10);
+  const minor = Number.parseInt(minorPart, 10);
+
+  return `${Number.isNaN(major) ? 0 : major}.${Number.isNaN(minor) ? 0 : minor}`;
+}
+
 function getLocalFirstConfigDocument(): OllamaSearchConfigDocument {
   return {
+    version: GENERATED_CONFIG_VERSION,
     default: {
       maxResults: LOCAL_FIRST_MAX_RESULTS,
       maxOutputChars: LOCAL_FIRST_MAX_OUTPUT_CHARS,
@@ -289,20 +299,7 @@ function ensureLocalFirstConfigFile(configRoot: string): string {
     return configPath;
   }
 
-  writeFileSync(
-    configPath,
-    `${JSON.stringify(
-      {
-        default: {
-          maxResults: LOCAL_FIRST_MAX_RESULTS,
-          maxOutputChars: LOCAL_FIRST_MAX_OUTPUT_CHARS,
-        },
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
+  writeFileSync(configPath, `${JSON.stringify(getLocalFirstConfigDocument(), null, 2)}\n`, "utf8");
 
   return configPath;
 }
