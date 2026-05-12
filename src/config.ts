@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import packageJson from "../package.json" with { type: "json" };
 
 export interface OllamaSearchConfig {
   apiKey?: string;
@@ -18,6 +19,7 @@ export interface LoadConfigOptions {
 }
 
 export interface OllamaSearchConfigDocument {
+  version?: unknown;
   default?: {
     maxResults?: unknown;
     maxOutputChars?: unknown;
@@ -46,6 +48,22 @@ export interface ExtensionProfile {
   maxOutputChars: number;
 }
 
+export interface LoadExtensionProfileConfigResult {
+  document: OllamaSearchConfigDocument;
+  warnings: string[];
+}
+
+export interface LoadConfigResult {
+  config: OllamaSearchConfig;
+  document: OllamaSearchConfigDocument;
+  warnings: string[];
+}
+
+interface LoadedConfigDocumentResult {
+  document: OllamaSearchConfigDocument;
+  warnings: string[];
+}
+
 export type ActiveProfileOrigin =
   | { kind: "default" }
   | { kind: "exact"; selector: string }
@@ -60,6 +78,11 @@ export const LOCAL_FIRST_MAX_OUTPUT_CHARS = 12_000;
 
 const CONFIG_FILE_NAME = "pi-ollama-web-search.json";
 const PROJECT_CONFIG_DIR = ".pi";
+const SUPPORTED_EXTENSION_VERSION = packageJson.version;
+const SUPPORTED_CONFIG_MAJOR_VERSION = Number.parseInt(
+  SUPPORTED_EXTENSION_VERSION.split(".")[0] ?? "0",
+  10,
+);
 
 export function isTruthyEnv(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase();
@@ -104,8 +127,42 @@ function getConfigPath(configRoot: string): string {
   return join(configRoot, CONFIG_FILE_NAME);
 }
 
+export function getExtensionProfileConfigPath(configRoot: string): string {
+  return getConfigPath(configRoot);
+}
+
 function getProjectConfigPath(projectRoot: string): string {
   return join(projectRoot, PROJECT_CONFIG_DIR, CONFIG_FILE_NAME);
+}
+
+function getLocalFirstConfigDocument(): OllamaSearchConfigDocument {
+  return {
+    default: {
+      maxResults: LOCAL_FIRST_MAX_RESULTS,
+      maxOutputChars: LOCAL_FIRST_MAX_OUTPUT_CHARS,
+    },
+  };
+}
+
+function getConfigVersionMismatchWarning(
+  version: unknown,
+  configPath: string,
+): string | undefined {
+  if (typeof version !== "string") {
+    return undefined;
+  }
+
+  const match = /^(\d+)/.exec(version.trim());
+  if (!match) {
+    return undefined;
+  }
+
+  const majorVersion = Number.parseInt(match[1], 10);
+  if (majorVersion === SUPPORTED_CONFIG_MAJOR_VERSION) {
+    return undefined;
+  }
+
+  return `Extension config at ${configPath} declares version ${version} with unsupported major version ${majorVersion}; expected major ${SUPPORTED_CONFIG_MAJOR_VERSION} from extension version ${SUPPORTED_EXTENSION_VERSION}. Using the config anyway.`;
 }
 
 function readConfigDocument(configPath: string): OllamaSearchConfigDocument {
@@ -114,6 +171,94 @@ function readConfigDocument(configPath: string): OllamaSearchConfigDocument {
   }
 
   return JSON.parse(readFileSync(configPath, "utf8")) as OllamaSearchConfigDocument;
+}
+
+function isConfigProfileDocument(value: unknown): value is {
+  maxResults?: unknown;
+  maxOutputChars?: unknown;
+} {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyValidProfileValues(value: unknown): boolean {
+  if (!isConfigProfileDocument(value)) {
+    return false;
+  }
+
+  if (
+    "maxResults" in value &&
+    value.maxResults !== undefined &&
+    parsePositiveInteger(value.maxResults) === undefined
+  ) {
+    return false;
+  }
+
+  if (
+    "maxOutputChars" in value &&
+    value.maxOutputChars !== undefined &&
+    parsePositiveInteger(value.maxOutputChars) === undefined
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isStructurallyValidConfigDocument(document: unknown): document is OllamaSearchConfigDocument {
+  if (typeof document !== "object" || document === null || Array.isArray(document)) {
+    return false;
+  }
+
+  if ("default" in document && document.default !== undefined && !hasOnlyValidProfileValues(document.default)) {
+    return false;
+  }
+
+  if ("models" in document && document.models !== undefined) {
+    if (typeof document.models !== "object" || document.models === null || Array.isArray(document.models)) {
+      return false;
+    }
+
+    for (const profile of Object.values(document.models)) {
+      if (!hasOnlyValidProfileValues(profile)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function loadConfigDocument(
+  configPath: string,
+  fallbackDocument: OllamaSearchConfigDocument,
+  invalidWarning: string,
+): LoadedConfigDocumentResult {
+  let document: OllamaSearchConfigDocument;
+
+  try {
+    document = readConfigDocument(configPath);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) {
+      throw error;
+    }
+
+    return {
+      document: fallbackDocument,
+      warnings: [invalidWarning],
+    };
+  }
+
+  if (!isStructurallyValidConfigDocument(document)) {
+    return {
+      document: fallbackDocument,
+      warnings: [invalidWarning],
+    };
+  }
+
+  return {
+    document,
+    warnings: [],
+  };
 }
 
 function mergeConfigDocuments(
@@ -175,28 +320,77 @@ export function resolveConfigDocuments(
 
 export function loadExtensionProfileConfig(
   options: LoadExtensionProfileConfigOptions,
-): {
-  document: OllamaSearchConfigDocument;
-} {
-  const globalConfigDocument = readConfigDocument(options.globalConfigPath);
-  const projectConfigDocument = options.projectRoot
-    ? readConfigDocument(getProjectConfigPath(options.projectRoot))
-    : {};
+): LoadExtensionProfileConfigResult {
+  const globalConfigResult = loadConfigDocument(
+    options.globalConfigPath,
+    getLocalFirstConfigDocument(),
+    `Ignoring invalid extension config at ${options.globalConfigPath}; using local-first defaults.`,
+  );
+  const warnings = [...globalConfigResult.warnings];
+  const globalConfigDocument = globalConfigResult.document;
+
+  const versionMismatchWarning = getConfigVersionMismatchWarning(
+    globalConfigDocument.version,
+    options.globalConfigPath,
+  );
+  if (versionMismatchWarning) {
+    warnings.push(versionMismatchWarning);
+  }
+
+  const projectConfigPath = options.projectRoot
+    ? getProjectConfigPath(options.projectRoot)
+    : undefined;
+  const projectConfigResult = projectConfigPath
+    ? loadConfigDocument(
+        projectConfigPath,
+        {},
+        `Ignoring invalid project config at ${projectConfigPath}; using global/default values.`,
+      )
+    : { document: {}, warnings: [] };
+  warnings.push(...projectConfigResult.warnings);
+  const projectConfigDocument = projectConfigResult.document;
+  const projectVersionMismatchWarning = projectConfigPath
+    ? getConfigVersionMismatchWarning(projectConfigDocument.version, projectConfigPath)
+    : undefined;
+  if (projectVersionMismatchWarning) {
+    warnings.push(projectVersionMismatchWarning);
+  }
 
   return {
     document: mergeConfigDocuments(globalConfigDocument, projectConfigDocument),
+    warnings,
   };
 }
 
 export function resolveActiveProfile(options: {
   document: OllamaSearchConfigDocument;
   activeModelKey?: string;
+  activeModelAvailable?: boolean;
 }): {
   profile: ExtensionProfile;
   origin: ActiveProfileOrigin;
+  warnings?: string[];
 } {
+  const defaultProfile = parseExtensionProfile(options.document.default) ?? {
+    maxResults: LOCAL_FIRST_MAX_RESULTS,
+    maxOutputChars: LOCAL_FIRST_MAX_OUTPUT_CHARS,
+  };
+
+  if (options.activeModelAvailable === false) {
+    return {
+      profile: defaultProfile,
+      origin: {
+        kind: "default",
+      },
+      warnings: [
+        "Using the default search profile because the current model could not be determined.",
+      ],
+    };
+  }
+
   if (options.activeModelKey) {
-    const exactProfile = parseExtensionProfile(options.document.models?.[options.activeModelKey]);
+    const exactCandidate = options.document.models?.[options.activeModelKey];
+    const exactProfile = parseExtensionProfile(exactCandidate);
     if (exactProfile) {
       return {
         profile: exactProfile,
@@ -244,53 +438,66 @@ export function resolveActiveProfile(options: {
         },
       };
     }
+
   }
 
   return {
-    profile: parseExtensionProfile(options.document.default) ?? {
-      maxResults: LOCAL_FIRST_MAX_RESULTS,
-      maxOutputChars: LOCAL_FIRST_MAX_OUTPUT_CHARS,
-    },
+    profile: defaultProfile,
     origin: {
       kind: "default",
     },
   };
 }
 
-function loadLocalFirstDefaults(options: ResolveConfigDocumentsOptions): Pick<OllamaSearchConfig, "maxResults" | "maxOutputChars"> {
-  const parsed = resolveConfigDocuments(options);
-
-  return {
-    maxResults: parsePositiveInteger(parsed.default?.maxResults) ?? LOCAL_FIRST_MAX_RESULTS,
-    maxOutputChars: parsePositiveInteger(parsed.default?.maxOutputChars) ?? LOCAL_FIRST_MAX_OUTPUT_CHARS,
-  };
-}
-
-export function loadConfig(env: Env = process.env, options?: LoadConfigOptions): OllamaSearchConfig {
+export function loadConfigWithWarnings(
+  env: Env = process.env,
+  options?: LoadConfigOptions,
+): LoadConfigResult {
   if (options?.configRoot) {
-    const defaults = loadLocalFirstDefaults({
-      configRoot: options.configRoot,
+    const extensionProfileConfig = loadExtensionProfileConfig({
+      globalConfigPath: ensureLocalFirstConfigFile(options.configRoot),
       projectRoot: options.projectRoot,
     });
 
     return {
-      apiKey: optionalTrimmed(env.OLLAMA_API_KEY),
-      devMode: isTruthyEnv(env.PI_OLLAMA_SEARCH_DEV),
-      searchEndpoint: OLLAMA_WEB_SEARCH_ENDPOINT,
-      fetchEndpoint: OLLAMA_WEB_FETCH_ENDPOINT,
-      maxResults: defaults.maxResults,
-      maxOutputChars: defaults.maxOutputChars,
+      config: {
+        apiKey: optionalTrimmed(env.OLLAMA_API_KEY),
+        devMode: isTruthyEnv(env.PI_OLLAMA_SEARCH_DEV),
+        searchEndpoint: OLLAMA_WEB_SEARCH_ENDPOINT,
+        fetchEndpoint: OLLAMA_WEB_FETCH_ENDPOINT,
+        maxResults:
+          parsePositiveInteger(extensionProfileConfig.document.default?.maxResults) ??
+          LOCAL_FIRST_MAX_RESULTS,
+        maxOutputChars:
+          parsePositiveInteger(extensionProfileConfig.document.default?.maxOutputChars) ??
+          LOCAL_FIRST_MAX_OUTPUT_CHARS,
+      },
+      document: extensionProfileConfig.document,
+      warnings: extensionProfileConfig.warnings,
     };
   }
 
   return {
-    apiKey: optionalTrimmed(env.OLLAMA_API_KEY),
-    devMode: isTruthyEnv(env.PI_OLLAMA_SEARCH_DEV),
-    searchEndpoint: OLLAMA_WEB_SEARCH_ENDPOINT,
-    fetchEndpoint: OLLAMA_WEB_FETCH_ENDPOINT,
-    maxResults: DEFAULT_MAX_RESULTS,
-    maxOutputChars: DEFAULT_MAX_OUTPUT_CHARS,
+    config: {
+      apiKey: optionalTrimmed(env.OLLAMA_API_KEY),
+      devMode: isTruthyEnv(env.PI_OLLAMA_SEARCH_DEV),
+      searchEndpoint: OLLAMA_WEB_SEARCH_ENDPOINT,
+      fetchEndpoint: OLLAMA_WEB_FETCH_ENDPOINT,
+      maxResults: DEFAULT_MAX_RESULTS,
+      maxOutputChars: DEFAULT_MAX_OUTPUT_CHARS,
+    },
+    document: {
+      default: {
+        maxResults: DEFAULT_MAX_RESULTS,
+        maxOutputChars: DEFAULT_MAX_OUTPUT_CHARS,
+      },
+    },
+    warnings: [],
   };
+}
+
+export function loadConfig(env: Env = process.env, options?: LoadConfigOptions): OllamaSearchConfig {
+  return loadConfigWithWarnings(env, options).config;
 }
 
 export function getMissingApiKeyMessage(): string {
