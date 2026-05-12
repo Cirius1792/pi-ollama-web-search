@@ -1560,11 +1560,100 @@ describe("extension", () => {
 
       expect(searchResult.details.results).toHaveLength(1);
       expect(searchResult.details.maxOutputChars).toBe(80);
+      expect(searchResult.details.appliedProfile).toEqual({
+        maxResults: 1,
+        maxOutputChars: 80,
+        origin: {
+          kind: "exact",
+          selector: "ollama/qwen3:14b",
+        },
+      });
       expect(fetchResult.details.maxOutputChars).toBe(80);
       expect(fetchResult.details.truncated).toBe(true);
+      expect(fetchResult.details.appliedProfile).toBeUndefined();
       expect(ctx.ui.notify).not.toHaveBeenCalled();
       expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
         query: "profiled query",
+        max_results: 1,
+      });
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes the winning pattern selector in search details when a model-family override wins", async () => {
+    process.env.OLLAMA_API_KEY = "test-key";
+
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-agent-config-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      await writeFile(
+        join(agentDir, "pi-ollama-web-search.json"),
+        JSON.stringify({
+          default: {
+            maxResults: 3,
+            maxOutputChars: 120,
+          },
+          models: {
+            "ollama/qwen*": {
+              maxResults: 2,
+              maxOutputChars: 90,
+            },
+            "ollama/qwen3*": {
+              maxResults: 1,
+              maxOutputChars: 70,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { max_results?: number };
+
+        return jsonResponse({
+          results: [
+            { title: "One", url: "https://example.com/one", content: "First result" },
+            { title: "Two", url: "https://example.com/two", content: "Second result" },
+          ].slice(0, body.max_results),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const fake = createFakePi();
+      extension(fake.pi as any);
+
+      const searchTool = fake.tools.find((tool) => tool.name === "ollama_web_search");
+      const notify = vi.fn();
+
+      const result = await searchTool!.execute(
+        "tool-search-pattern-profile",
+        { query: "pattern profile query" },
+        new AbortController().signal,
+        undefined,
+        {
+          model: {
+            provider: "ollama",
+            id: "qwen3:14b",
+          },
+          ui: { notify },
+        },
+      );
+
+      expect(result.details.results).toHaveLength(1);
+      expect(result.details.maxOutputChars).toBe(70);
+      expect(result.details.appliedProfile).toEqual({
+        maxResults: 1,
+        maxOutputChars: 70,
+        origin: {
+          kind: "pattern",
+          selector: "ollama/qwen3*",
+        },
+      });
+      expect(notify).not.toHaveBeenCalled();
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
+        query: "pattern profile query",
         max_results: 1,
       });
     } finally {
@@ -1624,6 +1713,13 @@ describe("extension", () => {
 
       expect(result.details.results).toHaveLength(2);
       expect(result.details.maxOutputChars).toBe(70);
+      expect(result.details.appliedProfile).toEqual({
+        maxResults: 2,
+        maxOutputChars: 70,
+        origin: {
+          kind: "default",
+        },
+      });
       expect(notify).toHaveBeenCalledWith(
         "Using the default search profile because the current model could not be determined.",
         "warning",
