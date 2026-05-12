@@ -129,7 +129,14 @@ function resolveExecutionConfig(
   document: Parameters<typeof resolveActiveProfile>[0]["document"],
   configRoot: string,
   ctx?: ToolExecutionContext,
-): OllamaSearchConfig {
+): {
+  config: OllamaSearchConfig;
+  appliedProfile: {
+    maxResults: number;
+    maxOutputChars: number;
+    origin: ReturnType<typeof resolveActiveProfile>["origin"];
+  };
+} {
   const scopedConfig = ctx?.cwd
     ? loadConfigWithWarnings(process.env, { configRoot, projectRoot: ctx.cwd })
     : undefined;
@@ -149,9 +156,16 @@ function resolveExecutionConfig(
   }
 
   return {
-    ...config,
-    maxResults: activeProfile.profile.maxResults,
-    maxOutputChars: activeProfile.profile.maxOutputChars,
+    config: {
+      ...config,
+      maxResults: activeProfile.profile.maxResults,
+      maxOutputChars: activeProfile.profile.maxOutputChars,
+    },
+    appliedProfile: {
+      maxResults: activeProfile.profile.maxResults,
+      maxOutputChars: activeProfile.profile.maxOutputChars,
+      origin: activeProfile.origin,
+    },
   };
 }
 
@@ -204,7 +218,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     parameters: SearchParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const activeConfig = resolveExecutionConfig(config, document, configRoot, ctx);
+      const { config: activeConfig, appliedProfile } = resolveExecutionConfig(config, document, configRoot, ctx);
       const result = await runOllamaWebSearch(params.query, {
         config: activeConfig,
         signal,
@@ -217,6 +231,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
           truncated: result.truncated,
           ...(result.fullContentRef ? { fullContentRef: result.fullContentRef } : {}),
           ...(result.retrieval ? { retrieval: result.retrieval } : {}),
+          appliedProfile,
         },
       };
     },
@@ -236,7 +251,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     parameters: FetchParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const activeConfig = resolveExecutionConfig(config, document, configRoot, ctx);
+      const { config: activeConfig } = resolveExecutionConfig(config, document, configRoot, ctx);
       const result = await runOllamaWebFetch(params.url, {
         config: activeConfig,
         signal,
