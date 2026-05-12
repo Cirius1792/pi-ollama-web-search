@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +49,7 @@ beforeEach(() => {
   process.env = { ...originalEnv };
   delete process.env.OLLAMA_API_KEY;
   delete process.env.PI_OLLAMA_SEARCH_DEV;
+  delete process.env.PI_CODING_AGENT_DIR;
 });
 
 afterEach(() => {
@@ -65,6 +66,23 @@ describe("extension", () => {
     expect(fake.tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["ollama_web_search", "ollama_web_fetch", "ollama_web_read_full"]),
     );
+  });
+
+  it("creates the dedicated global config during extension startup without changing registered tools", async () => {
+    const fake = createFakePi();
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-ollama-extension-"));
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      extension(fake.pi as any);
+
+      expect(fake.tools.map((tool) => tool.name)).toEqual(
+        expect.arrayContaining(["ollama_web_search", "ollama_web_fetch", "ollama_web_read_full"]),
+      );
+      await expect(access(join(agentDir, "pi-ollama-web-search.json"))).resolves.toBeUndefined();
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
   });
 
   it("adds proactive guidance for when search and fetch should be used", () => {

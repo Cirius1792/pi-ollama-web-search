@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fetchOllamaWeb, searchOllamaWeb } from "./client.js";
 import { getMissingApiKeyMessage, loadConfig } from "./config.js";
@@ -91,7 +91,7 @@ function parseReadFullDebugArgs(args: string): Omit<Parameters<typeof runOllamaW
 }
 
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
-  const config = loadConfig();
+  const config = loadConfig(process.env, { configRoot: getAgentDir() });
   const fetchRetrievalStore = createFetchRetrievalStore({
     replayFetch: async ({ url, signal }) => {
       if (!config.apiKey) {
