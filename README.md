@@ -1,6 +1,8 @@
 # @cltec/pi-ollama-web-search
 
-A reusable [pi](https://pi.dev) package that exposes Ollama web APIs as custom pi tools.
+A local-first, context-safe [pi](https://pi.dev) package that exposes Ollama web APIs as custom pi tools.
+
+This package is designed for workflows where model context is scarce, especially when you are running local models. It keeps discovery output compact by default, supports selective follow-up retrieval, and lets fetched content be exported to files when you do not want large payloads in the main model context.
 
 ## What it provides
 
@@ -12,11 +14,11 @@ This package registers three production tools:
 
 Tool behavior:
 
-- `ollama_web_search` accepts a search query and returns web results with title, URL, and content snippets.
+- `ollama_web_search` accepts a search query and returns compact search results with title, URL, and content snippets.
   - When results are present, tool `details` includes:
     - `fullContentRef`: opaque ref used for follow-up retrieval.
     - `retrieval`: per-result metadata (`resultIndex` + available sections with character counts).
-    - `appliedProfile`: the active profile values chosen for the current model.
+    - `appliedProfile`: the active local-first profile values chosen for the current model.
 - `ollama_web_fetch` accepts a URL and returns fetched page title, content, and discovered links.
   - Successful fetch responses include:
     - `fullContentRef`: opaque ref used for follow-up retrieval.
@@ -32,6 +34,18 @@ Tool behavior:
     - `servedFrom: "cache"` means the ref was still available in memory.
     - `servedFrom: "replay"` means the extension replayed the original search or fetch request after cache loss, so the retrieved web content may have changed.
   - Replay behavior is best-effort: the ref stays stable, but replay can still fail if upstream content changed, the original target can no longer be reconstructed, or the upstream request itself fails.
+
+## Why local-first
+
+Web results can consume context quickly, especially on smaller local models. This package is opinionated about that trade-off:
+
+- keep search output compact by default;
+- favor a few useful results over broad, noisy output;
+- fetch only when you already know the page you want;
+- read one field at a time when you need more detail;
+- export large fetched sections to a file instead of forcing them into model context.
+
+The extension does not implement downstream orchestration such as summarization agents or file-analysis pipelines, but it is intentionally shaped to support those workflows cleanly.
 
 ## Install
 
@@ -64,15 +78,91 @@ pi
 
 For persistent setup, add the export to your shell profile such as `~/.profile`, `~/.bashrc`, or `~/.zshrc`.
 
-## Usage
+## Configuration
 
-Ask pi questions that benefit from web search or page fetch.
+The extension uses a dedicated config file named `pi-ollama-web-search.json`.
 
-The extension includes prompt guidance so pi proactively uses tools when appropriate:
+### Global config
 
-- `ollama_web_search` for unknown URLs, documentation/reference lookup, and requests about latest/current/recent information.
-- `ollama_web_fetch` when a URL is known (or provided by the user), and before quoting/summarizing details from a specific page.
-- `ollama_web_read_full` after search or fetch truncation (or when more detail is needed) to retrieve one field at a time from a previous result/page.
+On startup, the extension creates a global config file automatically if it does not already exist.
+
+That file lives in pi's active config directory and starts with conservative local-first defaults:
+
+```json
+{
+  "default": {
+    "maxResults": 3,
+    "maxOutputChars": 12000
+  }
+}
+```
+
+### Project override config
+
+A repository can override the global defaults with:
+
+```text
+.pi/pi-ollama-web-search.json
+```
+
+Project config is merged on top of global config, so repository-local policy wins when both are present.
+
+### Model-aware profiles
+
+You can define exact model matches and simple `*` glob patterns using the canonical model key format `provider/id`.
+
+Example:
+
+```json
+{
+  "default": {
+    "maxResults": 3,
+    "maxOutputChars": 12000
+  },
+  "models": {
+    "ollama/qwen3:14b": {
+      "maxResults": 2,
+      "maxOutputChars": 9000
+    },
+    "ollama/qwen3*": {
+      "maxResults": 4,
+      "maxOutputChars": 20000
+    }
+  }
+}
+```
+
+Matching rules:
+
+- exact match wins over pattern match;
+- among matching patterns, the most specific pattern wins;
+- if nothing matches, the `default` profile is used.
+
+### Complete overrides, not patches
+
+Each model override must be a complete profile. In other words, model entries are not partial patches: include both `maxResults` and `maxOutputChars` for each override.
+
+### Optional version field
+
+Config files may include a top-level `version` string. If the config major version does not match the installed package major version, the extension warns and still uses the config when it is otherwise structurally valid.
+
+### Invalid config behavior
+
+Invalid config is non-blocking:
+
+- invalid global config falls back to local-first defaults;
+- invalid project config falls back to global/default values;
+- missing model matches quietly use the default profile;
+- if pi cannot determine the current model, the extension warns and uses the default profile.
+
+## Local-first workflow
+
+The intended workflow is:
+
+1. Run `ollama_web_search` first for compact discovery.
+2. Use `ollama_web_fetch` only when you have a specific URL or need a fuller page after search.
+3. Use `ollama_web_read_full` only with the returned ref, one field at a time.
+4. Use `mode: "file"` for large fetch sections you want to inspect outside the main model context.
 
 ### Search retrieval flow
 
@@ -93,15 +183,19 @@ The extension includes prompt guidance so pi proactively uses tools when appropr
    - `section`: one of `title`, `content`, or `links`.
 4. Use `mode: "file"` when you want the full fetch section written to disk instead of returned inline.
 5. Optional file-mode controls:
-    - Omit `path` to create a temporary export file that is cleaned up at session shutdown.
-    - Set `path` to keep a persistent export that remains on disk until you delete it.
-    - Set `overwrite: true` only when you intentionally want to replace an existing explicit export file.
+   - Omit `path` to create a temporary export file that is cleaned up at session shutdown.
+   - Set `path` to keep a persistent export that remains on disk until you delete it.
+   - Set `overwrite: true` only when you intentionally want to replace an existing explicit export file.
 6. If the in-memory fetch payload has been evicted, `ollama_web_read_full` may replay the original fetch request. Replay keeps the same ref but can return changed web content, and `details.servedFrom` will be `"replay"`.
 
-Example prompts:
+## Example prompts
 
 ```text
-Search for recent Ollama engine updates. If the output is truncated, use the returned full-content ref to read the full content for result 1.
+Search for recent Ollama engine updates. Keep the results compact. If the output is truncated, use the returned full-content ref to read the full content for result 1.
+```
+
+```text
+Search for the latest pi extension docs about themes, then fetch the most relevant result if the snippets are not enough.
 ```
 
 ```text
@@ -185,6 +279,10 @@ https://ollama.com/api/web_search
 https://ollama.com/api/web_fetch
 ```
 
+### Config warnings
+
+Config warnings are non-blocking. If a config file is invalid, the extension continues with safe defaults or higher-level fallback values and surfaces warnings through pi's UI when available.
+
 ## Development
 
 Install dependencies:
@@ -198,6 +296,12 @@ Run checks:
 ```bash
 npm run typecheck
 npm test
+```
+
+For release/package changes, also run:
+
+```bash
+npm pack --dry-run
 ```
 
 Release instructions are in [`docs/release.md`](docs/release.md).
