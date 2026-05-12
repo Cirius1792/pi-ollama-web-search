@@ -226,13 +226,13 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ollama_web_search",
     label: "Ollama Web Search",
-    description: "Search the web using Ollama's Web Search API. Returns title, URL, and content for each result.",
-    promptSnippet: "Search the web using Ollama Web Search for current or external information.",
+    description: "Search the web using Ollama's Web Search API with compact, context-safe results for discovery.",
+    promptSnippet: "Search the web using Ollama Web Search for compact, context-safe discovery of current or external information.",
     promptGuidelines: [
-      "Use ollama_web_search to discover relevant pages or current information when URLs are not known yet.",
+      "Use ollama_web_search for compact, context-safe discovery when URLs are not known yet.",
       "Use ollama_web_search for documentation or references when the answer depends on external sources.",
       "When the user asks for latest, current, or recent information, run ollama_web_search before answering.",
-      "Use ollama_web_search before ollama_web_fetch when you need candidate URLs first.",
+      "Use ollama_web_search before ollama_web_fetch when you need candidate URLs first and want to preserve context.",
     ],
     parameters: SearchParams,
 
@@ -259,12 +259,12 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ollama_web_fetch",
     label: "Ollama Web Fetch",
-    description: "Fetch a single web page using Ollama's Web Fetch API. Returns title, main content, and discovered links.",
-    promptSnippet: "Fetch a known URL using Ollama Web Fetch to retrieve fuller page content and links.",
+    description: "Fetch a single known web page using Ollama's Web Fetch API for fuller page content and links.",
+    promptSnippet: "Fetch a known URL using Ollama Web Fetch for selective follow-up when you need fuller page content and links.",
     promptGuidelines: [
-      "Use ollama_web_fetch when a specific URL is known and you need page content or links.",
+      "Use ollama_web_fetch when a specific URL is known and you need fuller page content or links.",
       "Use ollama_web_fetch when the user provides a URL to inspect.",
-      "Use ollama_web_fetch after ollama_web_search when search snippets are insufficient.",
+      "Use ollama_web_fetch after ollama_web_search when search snippets are insufficient and you need selective follow-up.",
       "Fetch source pages before quoting or summarizing details from a specific page.",
     ],
     parameters: FetchParams,
@@ -293,8 +293,9 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     promptSnippet: "Recover full text from previous Ollama web search/fetch refs one field at a time.",
     promptGuidelines: [
       "Use ollama_web_read_full only with refs returned by previous ollama_web_search or ollama_web_fetch calls.",
+      "Use ollama_web_read_full to recover one field at a time after search or fetch kept visible output compact.",
       "Search refs require resultIndex and support title/url/content sections.",
-      "Fetch refs support title/content/links and can use mode=file for temp-file or explicit-path exports.",
+      "Fetch refs support title/content/links and can use mode=file for large fetch sections or explicit-path exports.",
       "When using ollama_web_read_full with an explicit export path, delete explicit export files when you no longer need them.",
     ],
     parameters: ReadFullParams,

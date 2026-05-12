@@ -86,7 +86,7 @@ describe("extension", () => {
     }
   });
 
-  it("adds proactive guidance for when search and fetch should be used", () => {
+  it("adds local-first guidance for search and fetch workflows", () => {
     const fake = createFakePi();
     extension(fake.pi as any);
 
@@ -96,14 +96,16 @@ describe("extension", () => {
     expect(searchTool?.promptGuidelines).toEqual(
       expect.arrayContaining([
         expect.stringContaining("latest, current, or recent"),
-        expect.stringContaining("documentation or references"),
+        expect.stringContaining("compact"),
+        expect.stringContaining("context-safe"),
       ]),
     );
 
     expect(fetchTool?.promptGuidelines).toEqual(
       expect.arrayContaining([
         expect.stringContaining("user provides a URL"),
-        expect.stringContaining("before quoting or summarizing"),
+        expect.stringContaining("after ollama_web_search"),
+        expect.stringContaining("fuller page content"),
       ]),
     );
   });
@@ -1221,11 +1223,15 @@ describe("extension", () => {
     extension(fake.pi as any);
 
     const readFullTool = fake.tools.find((tool) => tool.name === "ollama_web_read_full");
+    const readFullGuidance = readFullTool?.promptGuidelines?.join(" ") ?? "";
 
     expect(readFullTool).toBeDefined();
     expect(readFullTool?.description).toContain("search or web fetch");
-    expect(readFullTool?.promptGuidelines?.join(" ")).toContain("ollama_web_search or ollama_web_fetch");
-    expect(readFullTool?.promptGuidelines?.join(" ")).toContain(
+    expect(readFullGuidance).toContain("ollama_web_search or ollama_web_fetch");
+    expect(readFullGuidance).toContain("one field at a time");
+    expect(readFullGuidance).toContain("mode=file");
+    expect(readFullGuidance).toContain("large fetch sections");
+    expect(readFullGuidance).toContain(
       "When using ollama_web_read_full with an explicit export path, delete explicit export files when you no longer need them.",
     );
     expect(readFullTool?.parameters?.properties?.ref?.description).toContain("ollama_web_search or ollama_web_fetch");

@@ -1,7 +1,7 @@
 {
   "name": "@cltec/pi-ollama-web-search",
-  "version": "0.2.0",
-  "description": "A pi extension package that exposes Ollama Web Search and Web Fetch as custom tools.",
+  "version": "1.0.0",
+  "description": "A local-first, context-safe pi extension package for Ollama web search and fetch.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,10 @@
     "pi-extension",
     "ollama",
     "web-search",
-    "web-fetch"
+    "web-fetch",
+    "local-first",
+    "context-safe",
+    "local-models"
   ],
   "files": [
     "src",

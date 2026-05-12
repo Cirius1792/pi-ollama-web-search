@@ -6,6 +6,17 @@ This package is published to npm as `@cltec/pi-ollama-web-search` and can then b
 pi install npm:@cltec/pi-ollama-web-search
 ```
 
+## `1.0.0` product shift
+
+Version `1.0.0` marks a deliberate product repositioning: the package is now presented as a local-first, context-safe web workflow for pi.
+
+When preparing the `1.0.0` release and later release notes:
+
+- describe the change as a product shift, not a minor tuning change;
+- call out the dedicated config file and local-first defaults;
+- explain the intended workflow: compact discovery first, then selective fetch/read-full follow-up, with file export for large fetched sections;
+- avoid claiming orchestration features that the extension does not implement.
+
 ## One-time first publish
 
 Trusted Publishing cannot create a package that does not exist yet on npm. The first version must be published manually from a local machine authenticated with npm.
@@ -85,7 +96,7 @@ Use this flow for every release after Trusted Publishing is configured.
    npm version patch
    ```
 
-   Use `minor` or `major` instead of `patch` when appropriate.
+   Use `minor` or `major` instead of `patch` when appropriate. For the local-first product shift release, use `npm version major` to produce `1.0.0` if it has not already been set in `package.json`.
 
 3. Push the commit and tag:
 
