@@ -219,7 +219,7 @@ describe("runOllamaWebFetch", () => {
         totalChars: 400,
         visibleChars: 29,
         remainingChars: 371,
-        recommendedRetrievalMode: "inline",
+        recommendedRetrievalMode: "file",
       },
       links: {
         totalChars: "[1] https://example.com/1\n[2] https://example.com/2".length,

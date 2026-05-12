@@ -1570,7 +1570,12 @@ describe("extension", () => {
       });
       expect(fetchResult.details.maxOutputChars).toBe(80);
       expect(fetchResult.details.truncated).toBe(true);
-      expect(fetchResult.details.appliedProfile).toBeUndefined();
+      expect(fetchResult.details.targets.content.recommendedRetrievalMode).toBe("file");
+      expect(fetchResult.details.appliedProfile).toEqual({
+        maxOutputChars: 80,
+        source: "exact",
+        matcher: "ollama/qwen3:14b",
+      });
       expect(ctx.ui.notify).not.toHaveBeenCalled();
       expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({
         query: "profiled query",

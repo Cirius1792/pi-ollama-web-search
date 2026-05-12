@@ -169,6 +169,25 @@ function resolveExecutionConfig(
   };
 }
 
+function toFetchAppliedProfile(origin: ReturnType<typeof resolveActiveProfile>["origin"], maxOutputChars: number): {
+  maxOutputChars: number;
+  source: "default" | "exact" | "pattern";
+  matcher?: string;
+} {
+  if (origin.kind === "default") {
+    return {
+      maxOutputChars,
+      source: "default",
+    };
+  }
+
+  return {
+    maxOutputChars,
+    source: origin.kind,
+    matcher: origin.selector,
+  };
+}
+
 export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
   const configRoot = getAgentDir();
   const { config, document, warnings: configWarnings } = loadConfigWithWarnings(process.env, { configRoot });
@@ -251,7 +270,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
     parameters: FetchParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const { config: activeConfig } = resolveExecutionConfig(config, document, configRoot, ctx);
+      const { config: activeConfig, appliedProfile } = resolveExecutionConfig(config, document, configRoot, ctx);
       const result = await runOllamaWebFetch(params.url, {
         config: activeConfig,
         signal,
@@ -261,6 +280,7 @@ export default function ollamaWebSearchExtension(pi: ExtensionAPI) {
         content: [{ type: "text", text: result.formatted }],
         details: {
           ...result.normalized,
+          appliedProfile: toFetchAppliedProfile(appliedProfile.origin, appliedProfile.maxOutputChars),
         },
       };
     },
