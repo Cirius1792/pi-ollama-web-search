@@ -16,10 +16,12 @@ Tool behavior:
   - When results are present, tool `details` includes:
     - `fullContentRef`: opaque ref used for follow-up retrieval.
     - `retrieval`: per-result metadata (`resultIndex` + available sections with character counts).
+    - `appliedProfile`: the active profile values chosen for the current model.
 - `ollama_web_fetch` accepts a URL and returns fetched page title, content, and discovered links.
   - Successful fetch responses include:
     - `fullContentRef`: opaque ref used for follow-up retrieval.
     - target metadata for `title`, `content`, and `links`, including visibility/truncation information.
+    - `appliedProfile`: the active fetch budget metadata, including the selected value source and winning matcher when one applies.
 - `ollama_web_read_full` accepts a `ref` returned by `ollama_web_search` or `ollama_web_fetch`.
   - Search refs (`ws_s_*`) read exactly one section (`title`, `url`, or `content`) for a 1-based `resultIndex`.
   - Fetch refs (`fetch:*`) read one section (`title`, `content`, or `links`) inline, or export the full section in `mode: "file"`.

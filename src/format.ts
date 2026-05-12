@@ -3,6 +3,7 @@ import type { NormalizedFetchResponse, NormalizedSearchResponse } from "./normal
 export interface FormatOptions {
   maxOutputChars: number;
   fullContentRef?: string;
+  recommendationThreshold?: number;
 }
 
 export interface SearchFormatOptions extends FormatOptions {
@@ -68,7 +69,11 @@ function applySafetyCap(text: string, maxOutputChars: number, truncationNotice?:
   return text.slice(0, available).trimEnd() + notice;
 }
 
-function buildTargetVisibilityMetadata(totalChars: number, visibleChars: number): TargetVisibilityMetadata {
+function buildTargetVisibilityMetadata(
+  totalChars: number,
+  visibleChars: number,
+  recommendationThreshold: number,
+): TargetVisibilityMetadata {
   const clampedVisibleChars = Math.max(0, Math.min(totalChars, visibleChars));
   const remainingChars = Math.max(0, totalChars - clampedVisibleChars);
 
@@ -76,7 +81,7 @@ function buildTargetVisibilityMetadata(totalChars: number, visibleChars: number)
     totalChars,
     visibleChars: clampedVisibleChars,
     remainingChars,
-    recommendedRetrievalMode: remainingChars <= RETRIEVAL_INLINE_THRESHOLD ? "inline" : "file",
+    recommendedRetrievalMode: remainingChars <= recommendationThreshold ? "inline" : "file",
   };
 }
 
@@ -86,7 +91,14 @@ function buildSearchResultChunk(index: number, title: string, url: string, conte
   return { separator, prefix, chunk: separator + prefix + content };
 }
 
-function buildSearchResultVisibility(index: number, title: string, url: string, content: string, visibleChunkChars: number): SearchResultTruncationMetadata {
+function buildSearchResultVisibility(
+  index: number,
+  title: string,
+  url: string,
+  content: string,
+  visibleChunkChars: number,
+  recommendationThreshold: number,
+): SearchResultTruncationMetadata {
   const { separator } = buildSearchResultChunk(index, title, url, content);
   let remaining = Math.max(0, visibleChunkChars - separator.length);
 
@@ -109,9 +121,9 @@ function buildSearchResultVisibility(index: number, title: string, url: string, 
 
   return {
     targets: {
-      title: buildTargetVisibilityMetadata(title.length, titleVisible),
-      url: buildTargetVisibilityMetadata(url.length, urlVisible),
-      content: buildTargetVisibilityMetadata(content.length, contentVisible),
+      title: buildTargetVisibilityMetadata(title.length, titleVisible, recommendationThreshold),
+      url: buildTargetVisibilityMetadata(url.length, urlVisible, recommendationThreshold),
+      content: buildTargetVisibilityMetadata(content.length, contentVisible, recommendationThreshold),
     },
   };
 }
@@ -167,6 +179,8 @@ function buildSearchTrailingNotices(maxOutputChars: number, omittedResultCount: 
 }
 
 export function formatSearchResultsWithMetadata(response: NormalizedSearchResponse, options: SearchFormatOptions): FormattedSearchResult {
+  const recommendationThreshold = options.recommendationThreshold ?? RETRIEVAL_INLINE_THRESHOLD;
+
   if (response.results.length === 0) {
     return {
       text: "No results found.",
@@ -192,9 +206,9 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
         omittedResultCount: 0,
         results: response.results.map((result) => ({
           targets: {
-            title: buildTargetVisibilityMetadata(result.title.length, result.title.length),
-            url: buildTargetVisibilityMetadata(result.url.length, result.url.length),
-            content: buildTargetVisibilityMetadata(result.content.length, result.content.length),
+            title: buildTargetVisibilityMetadata(result.title.length, result.title.length, recommendationThreshold),
+            url: buildTargetVisibilityMetadata(result.url.length, result.url.length, recommendationThreshold),
+            content: buildTargetVisibilityMetadata(result.content.length, result.content.length, recommendationThreshold),
           },
         })),
       },
@@ -205,9 +219,9 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
 
   const metadata: SearchResultTruncationMetadata[] = response.results.map((result) => ({
     targets: {
-      title: buildTargetVisibilityMetadata(result.title.length, 0),
-      url: buildTargetVisibilityMetadata(result.url.length, 0),
-      content: buildTargetVisibilityMetadata(result.content.length, 0),
+      title: buildTargetVisibilityMetadata(result.title.length, 0, recommendationThreshold),
+      url: buildTargetVisibilityMetadata(result.url.length, 0, recommendationThreshold),
+      content: buildTargetVisibilityMetadata(result.content.length, 0, recommendationThreshold),
     },
   }));
 
@@ -228,9 +242,9 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
       visibleChunkText += chunk.chunk;
       metadata[index] = {
         targets: {
-          title: buildTargetVisibilityMetadata(result.title.length, result.title.length),
-          url: buildTargetVisibilityMetadata(result.url.length, result.url.length),
-          content: buildTargetVisibilityMetadata(result.content.length, result.content.length),
+          title: buildTargetVisibilityMetadata(result.title.length, result.title.length, recommendationThreshold),
+          url: buildTargetVisibilityMetadata(result.url.length, result.url.length, recommendationThreshold),
+          content: buildTargetVisibilityMetadata(result.content.length, result.content.length, recommendationThreshold),
         },
       };
       continue;
@@ -242,7 +256,14 @@ export function formatSearchResultsWithMetadata(response: NormalizedSearchRespon
     if (availableForChunk >= prefixLength) {
       const visibleContentChars = Math.min(result.content.length, availableForChunk - prefixLength);
       partialChunk = chunk.separator + chunk.prefix + result.content.slice(0, visibleContentChars);
-      metadata[index] = buildSearchResultVisibility(index, result.title, result.url, result.content, partialChunk.length);
+      metadata[index] = buildSearchResultVisibility(
+        index,
+        result.title,
+        result.url,
+        result.content,
+        partialChunk.length,
+        recommendationThreshold,
+      );
       omittedResultCount = omittedIfStopHere;
     } else {
       partialChunk = "";
@@ -278,6 +299,7 @@ function buildLinksSection(links: string[]): string {
 }
 
 export function formatFetchResultWithMetadata(response: NormalizedFetchResponse, options: FormatOptions): FormattedFetchResult {
+  const recommendationThreshold = options.recommendationThreshold ?? RETRIEVAL_INLINE_THRESHOLD;
   const linksSection = buildLinksSection(response.links);
   const headerPrefix = "Fetched page:\n\nTitle: ";
   const betweenTitleAndContent = "\n\nContent:\n";
@@ -291,9 +313,9 @@ export function formatFetchResultWithMetadata(response: NormalizedFetchResponse,
         truncated: false,
         maxOutputChars: options.maxOutputChars,
         targets: {
-          title: buildTargetVisibilityMetadata(response.title.length, response.title.length),
-          content: buildTargetVisibilityMetadata(response.content.length, response.content.length),
-          links: buildTargetVisibilityMetadata(linksSection.length, linksSection.length),
+          title: buildTargetVisibilityMetadata(response.title.length, response.title.length, recommendationThreshold),
+          content: buildTargetVisibilityMetadata(response.content.length, response.content.length, recommendationThreshold),
+          links: buildTargetVisibilityMetadata(linksSection.length, linksSection.length, recommendationThreshold),
         },
       },
     };
@@ -352,9 +374,9 @@ export function formatFetchResultWithMetadata(response: NormalizedFetchResponse,
         truncated: true,
         maxOutputChars: options.maxOutputChars,
         targets: {
-          title: buildTargetVisibilityMetadata(response.title.length, 0),
-          content: buildTargetVisibilityMetadata(response.content.length, 0),
-          links: buildTargetVisibilityMetadata(linksSection.length, 0),
+          title: buildTargetVisibilityMetadata(response.title.length, 0, recommendationThreshold),
+          content: buildTargetVisibilityMetadata(response.content.length, 0, recommendationThreshold),
+          links: buildTargetVisibilityMetadata(linksSection.length, 0, recommendationThreshold),
         },
       },
     };
@@ -366,9 +388,9 @@ export function formatFetchResultWithMetadata(response: NormalizedFetchResponse,
       truncated: true,
       maxOutputChars: options.maxOutputChars,
       targets: {
-        title: buildTargetVisibilityMetadata(response.title.length, visibleTitleChars),
-        content: buildTargetVisibilityMetadata(response.content.length, visibleContentChars),
-        links: buildTargetVisibilityMetadata(linksSection.length, visibleLinksChars),
+        title: buildTargetVisibilityMetadata(response.title.length, visibleTitleChars, recommendationThreshold),
+        content: buildTargetVisibilityMetadata(response.content.length, visibleContentChars, recommendationThreshold),
+        links: buildTargetVisibilityMetadata(linksSection.length, visibleLinksChars, recommendationThreshold),
       },
     },
   };

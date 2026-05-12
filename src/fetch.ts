@@ -50,6 +50,7 @@ export async function runOllamaWebFetch(url: string, options: RunOllamaWebFetchO
   const formattedResult = formatFetchResultWithMetadata(normalized, {
     maxOutputChars: options.config.maxOutputChars,
     fullContentRef: normalized.fullContentRef,
+    recommendationThreshold: options.config.maxOutputChars,
   });
 
   return {
